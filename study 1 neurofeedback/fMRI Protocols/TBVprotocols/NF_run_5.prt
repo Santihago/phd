@@ -1,0 +1,90 @@
+
+FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NF_run_5
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+NrOfConditions:     6
+
+rest
+11
+   1   16
+  49   64
+ 100  115
+ 149  164
+ 200  215
+ 251  266
+ 300  315
+ 349  364
+ 399  414
+ 451  466
+ 500  515
+Color: 230 25 75
+
+task6
+5
+  17   32
+  65   80
+ 267  282
+ 316  331
+ 365  380
+Color: 234 209 93
+
+task9
+5
+ 116  131
+ 165  180
+ 216  231
+ 415  430
+ 467  482
+Color: 82 210 115
+
+rating
+10
+  34   39
+  83   88
+ 134  139
+ 183  188
+ 235  240
+ 285  290
+ 333  338
+ 384  389
+ 434  439
+ 484  489
+Color: 220 220 220
+
+confidence
+10
+  41   46
+  92   97
+ 141  146
+ 192  197
+ 243  248
+ 292  297
+ 341  346
+ 391  396
+ 443  448
+ 492  497
+Color: 150 150 150
+
+feedback
+10
+  47   48
+  98   99
+ 147  148
+ 198  199
+ 249  250
+ 298  299
+ 347  348
+ 397  398
+ 449  450
+ 498  499
+Color: 245 130 48

@@ -1,0 +1,1374 @@
+---
+title: 'R Notebook: Cardiac feedback analysis'
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library('tidyverse')
+library('lmerTest')
+knitr::opts_chunk$set(dpi=600)
+
+```
+
+# Load HCT data
+
+Load and compile all datafiles from the Heartbeat Counting Task. The following
+chunk of code opens up all datafiles from the indicated folder, and selects
+a subet of columns from each of them. It then changes the name of some of the
+columns.
+
+```{r warning=F}
+hct_folder <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/interoception-IAPS/data/psychopy_output_raw/hct/"
+
+# select specific files inside folder
+hct_files = dir(path=hct_folder, patter='_HCT_')
+
+# read each selected file and combine into a unique dataframe
+hct_data <- hct_files %>%
+  # using cols_only() to select only a subset of columns from the CSV file
+  map(~ read_csv(file.path(hct_folder, .), 
+                 col_types = cols_only(BlockNr = "i", 
+                                       Type = "c", 
+                                       Target = "i", 
+                                       Answer = "i", 
+                                       participant = "i"),
+                 na = c("-1"))) %>%
+  reduce(rbind) %>%    # reduce with rbind into one dataframe
+  transmute(           # keep only some columns, and change some column names
+    id = participant,
+    trial = BlockNr,
+    condition = Type,
+    real = Target,
+    counted = Answer)
+```
+
+This will calculate interoceptive accuracy and time estimation accuracy using
+the standard formula `result_c`. Another formula is also applied (`result_g`)
+but not used for these analyses.
+
+```{r}
+hct_data <- hct_data %>%
+  mutate(abs_diff    = abs(real-counted),
+         denominator = (real+counted)/2,
+         result_g = 1-(abs_diff/denominator),
+         result_c = 1-(abs_diff)/real)
+
+id_iacc <- hct_data %>%
+  filter(condition == 'beats') %>%
+  group_by(id) %>%
+  summarise(iacc_g = mean(result_g),
+            iacc_c = mean(result_c)) %>%
+  arrange(iacc_g)
+
+id_tacc <- hct_data %>%
+  filter(condition == 'time') %>%
+  group_by(id) %>%
+  summarise(tacc = mean(result_c)) %>%
+  arrange(tacc)
+```
+
+# Load full AIT data
+
+Same as above, but noe with the datafiles from the Affective Image Task.
+
+```{r warning=F}
+ait_folder <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/interoception-IAPS/data/psychopy_output_raw/ait/"
+
+# select specific files inside folder
+ait_files = dir(path=ait_folder, patter='_Affective Image Task_')
+
+# read each selected file and combine into a unique dataframe
+ait_data <- ait_files %>%
+  # using cols_only() to select only a subset of columns from the CSV file
+  map(~ read_csv(file.path(ait_folder, .), 
+                 col_types = cols_only(Emotion = "c", 
+                                       trials.thisN = "i", 
+                                       Beats_Pre = "i", 
+                                       BPM_Pre = "d", 
+                                       arousal.response = "i",
+                                       valenc.response = "i",
+                                       Beats_Post = "i",
+                                       BPM_Post = "d",
+                                       participant = "i"),
+                 na = c("-1", "NA", ""))) %>%
+  reduce(rbind) %>%    # reduce with rbind into one dataframe
+  transmute(           # keep only some columns, and change some column names
+    id = participant,
+    trial = trials.thisN+1,
+    emo5 = Emotion,
+    n_beat_pre = Beats_Pre,
+    n_beat_post = Beats_Post,
+    bpm_pre = BPM_Pre,
+    bpm_post = BPM_Post,
+    arousal = arousal.response,
+    valence = valenc.response
+    )
+
+# Add feedback condition
+ait_data <- ait_data %>%
+  group_by(id) %>%
+  mutate(fb = case_when(((id %% 2 == 0) & (trial %in% 1:25)) ~ 'systole',  #even id
+                        ((id %% 2 == 0) & (trial %in% 26:50)) ~ 'diastole',
+                        ((id %% 2 == 1) & (trial %in% 1:25)) ~ 'diastole',
+                        ((id %% 2 == 1) & (trial %in% 26:50)) ~ 'systole')) %>%
+  ungroup()
+
+# Some more variable wrangling
+ait_data <- ait_data %>% 
+  mutate(
+    emo3 = case_when((emo5 %in% c('fearful', 'disgusting', 'sad')) ~ 'negative',
+                     (emo5 %in% c('positive')) ~ 'positive',
+                     (emo5 %in% c('neutral')) ~ 'neutral'),
+    emo3 = factor(emo3, levels = c('neutral', 'negative', 'positive'), labels=c('Neutral', 'Negative', 'Positive')),
+    fb = factor(fb, levels = c('systole', 'diastole'), labels=c('Systole', 'Diastole')),
+    hr = bpm_post-bpm_pre,
+    hr_tile = factor(ntile(hr, 3), labels = c('Greater deceleration', 'Average', 'Lowest Deceleration')))
+```
+
+Add the IAcc and TAcc scores to the main df.
+
+```{r}
+#Merge with IAcc data  
+df <- left_join(ait_data, id_iacc, by = 'id')
+df <- left_join(df, id_tacc, by = 'id')
+
+df <- df %>%
+  mutate(iacc = iacc_c) %>%  #or switch to iacc_g for the other formula (Garfinkel 2014)
+  mutate(iacc_bin = factor(ntile(iacc, 2), labels = c('Worse half', 'Better half')),
+         iacc_tile = factor(ntile(iacc, 3), labels = c('Worse', 'Average', 'Better')))
+```
+
+Some participants are excluded from the analysis. Their numbers are indicated
+below. We also drop all trials without HR information.
+
+```{r}
+# NA in IACC column
+excluded_iacc <- c(8,14,29,30,31,32,45,50,52,53,56)
+missing_iacc <- c(15,17,32,42,53)
+excluded_other <- c(6,7,21,19)  # 19 due to visual insepection: outlier HR averages!
+                   
+df <- df %>%
+  filter(!(id %in% excluded_iacc)) %>%
+  filter(!(id %in% missing_iacc)) %>%   # 5 participants 
+  filter(!(id %in% excluded_other)) %>%
+  drop_na(iacc)
+
+#remove trials with no beats detected
+df <- df %>%
+  drop_na(n_beat_pre, n_beat_post)
+# 134 trials
+```
+
+Get some information about the median HR response in order to set limits for
+removing outlier trials. 
+
+```{r}
+df %>% 
+  summarise(m = median(hr, na.rm=T), 
+            lim = sd(hr,na.rm=T)*3, 
+            up = m+lim, lo = m-lim)
+```
+
+
+```{r}
+df <- df %>%
+  filter(hr > -18.6 & hr < 10.6) # 56 extra trials, or total 218  8,4 %
+
+# Calculate z-score for each participant (do after cleaning)
+#df <- df %>%
+#  group_by(id) %>%
+#  mutate(hr_z = scale(hr)) %>%
+#  ungroup()
+```
+
+# Hypotheses and analysis plan
+
+### Hypotheses
+
+1. Manipulation check of arousal induction
+  a. Image category (pos, neg, neutral) will influence arousal ratings : Within-subject ANOVA (arousal ~ category)
+  b. Image category (pos, neg, neutral) will influence valence ratings : Within-subject ANOVA (valence ~ category)
+  c. Image category (pos, neg, neutral) will influence HR deceleration : Within-subject ANOVA (hr ~ category)
+
+2.
+  a. HR is correlated with arousal ratings : Pearson's correlation (hr x arousal)
+  b. HR is not correlated with valence ratings : Pearson's correlation (hr x valence)
+  c. Interoceptive Accuracy (IAcc) is not correlated with arousal ratings : Pearson's correlation (IAcc x arousal)
+  d. Interoceptive Accuracy (IAcc) is not correlated with valence ratings : Pearson's correlation (IAcc x valence)
+  e. Interoceptive Accuracy (IAcc) is not correlated with iacc? : Pearson's correlation
+
+3. Cardiac feedback
+  a. Feedback effect on arousal ratings (interaction with IAcc) : Mixed MR ANOVA model (arousal ~ category + feedback * IAcc )
+  b. No feedback effect on valence ratings : Mixed MR ANOVA model (valence ~ category + feedback * IAcc )
+  
+Alternative:
+
+  c. Linear Mixed Model (arousal ~ category + feedback * IAcc + (1|id))
+  d. Linear Mixed Model (valence ~ category + feedback * IAcc + (1|id))
+  
+  
+  
+### Interoceptive Accuracy 
+
+Get some IAcc information.
+  
+```{r}
+ia <- unique(df$iacc)
+qqnorm(ia); qqline(ia)
+hist(ia)
+mean(ia)
+median(ia)
+sd(ia)
+min(ia)
+max(ia)
+shapiro.test(ia)
+```
+  
+
+## 1. Manipulation check group-level
+
+Does the image category affect arousal, valence ratings and heart rate deceleration?
+
+### Arousal ratings
+
+```{r}
+df %>%
+  group_by(emo3) %>%
+  summarize(m = mean(arousal),
+            sd = sd(arousal)) 
+```
+
+LMM on Arousal
+
+```{r mdl1}
+df %>%
+  lmer(data = ., arousal ~ emo3 + (1|id)) %>%
+  {. ->> mdl1 } %>% 
+  summary()
+```
+
+```{r arousalplot}
+# arousal
+id_summ <- df %>%
+  group_by(id, emo3) %>%
+  summarise(id_ar = mean(arousal, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=emo3, y=arousal)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, color = 'black', fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  geom_jitter(data=id_summ, aes(y=id_ar), alpha=.4, height = .1, width = .1) +
+  #geom_point(data=id_summ, aes(y=id_ar), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.25) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = c(.15,.85),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_brewer(palette = "Set2") +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       #title = "Arousal ratings",
+       x = "Image category", y = "Arousal rating",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+=> Arousal ratings depend on the image category.
+
+Explore:
+
+- Separate people that don't show the difference? (calculate magnitude of diff)
+
+### Valence ratings
+
+```{r}
+df %>%
+  group_by(emo3) %>%
+  summarize(m = mean(valence),
+            sd = sd(valence)) 
+```
+
+
+LMM on Arousal
+
+```{r mdl2}
+df %>%
+  lmer(data = ., valence ~ emo3 + (1|id)) %>%
+  {. ->> mdl2 } %>% 
+  summary()
+```
+
+```{r valenceplot}
+# arousal
+id_summ <- df %>%
+  group_by(id, emo3) %>%
+  summarise(id_va = mean(valence, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=emo3, y=valence)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, color = 'black', fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  geom_jitter(data=id_summ, aes(y=id_va), alpha=.4, height = .1, width = .1) +
+  #geom_point(data=id_summ, aes(y=id_va), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.25) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = c(.15,.85),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Image category", y = "Valence rating",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+
+
+DATA UNDERLYING DATA SUMMARY, IF SCALE CLIPPED WITH GROUP VALUES!?
+
+
+### c. HR
+
+```{r}
+df %>%
+  group_by(emo3) %>%
+  summarize(m = mean(hr),
+            sd = sd(hr)) 
+```
+
+```{r mdl3}
+df %>%
+  lmer(data = ., hr ~ emo3 + (1|id)) %>%
+  {. ->> mdl3 } %>% 
+  summary()
+```
+
+```{r}
+#create group summary
+id_summ <- df %>%
+  #mutate()
+  group_by(id, emo3) %>%
+  summarise(id_hr = mean(hr, na.rm=T))
+# hr
+df %>%
+  ggplot(aes(x=emo3, y=hr)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, color='black', fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) + # fun.args = list(conf.int=1)
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_jitter(data=id_summ, aes(y=id_hr), alpha=.4, height = .1, width = .1) +
+  theme_linedraw() + 
+    theme(aspect.ratio = 2, 
+        legend.position = c(.2,.125),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #scale_y_continuous(limits=c(-50,10)) +
+  labs(
+       #title = "Mean Δ Heart Rate (BPM)",
+       x = "Image category", 
+       y = "Mean Δ Heart Rate (BPM)") +
+  NULL
+```
+
+```{r}
+df %>%
+  lmer(data = ., arousal ~ hr + (1|id)) %>%
+  {. ->> mdl3a } %>% 
+  summary()
+
+df %>%
+  lmer(data = ., valence ~ hr + (1|id)) %>%
+  {. ->> mdl3b } %>% 
+  summary()
+```
+
+## 2. IAcc group differences
+
+
+### Time estimation
+
+```{r}
+
+id_acc <- df %>%
+  group_by(id) %>%
+  summarise(id_iacc = first(iacc),
+            id_tacc = first(tacc))
+
+id_acc %>%
+  summarise(coef=cor.test(id_tacc, id_iacc)$estimate,
+            pval=cor.test(id_tacc, id_iacc)$p.value,
+            cimin=cor.test(id_tacc, id_iacc)$conf.int[1],
+            cimax=cor.test(id_tacc, id_iacc)$conf.int[2],
+            n = n())
+
+
+id_acc %>%
+  ggplot(aes(x=id_tacc, y=id_iacc)) +
+    geom_point() +
+    scale_y_continuous(limits=c(0,1), breaks = seq(0,1,.25)) +
+    scale_x_continuous(limits=c(0,1), breaks = seq(0,1,.25)) +
+    geom_smooth(method='lm', se=F, size=.25, color = 'red', linetype='dashed' ) +
+    theme_linedraw() +
+    #scale_color_brewer(palette = "Set2") +
+    theme(aspect.ratio = 1#, 
+          #legend.position = 'none'
+          ) +
+    labs(
+       x = "Time Estimation Accuracy (TAcc)", y = "Interoceptive Accuracy (IAcc)") +
+    NULL
+  
+
+```
+
+
+```{r}
+df %>%
+  group_by(emo3) %>%
+  summarize(m = mean(hr),
+            sd = sd(hr)) 
+```
+
+
+
+### a. Arousal
+
+
+```{r mdl4}
+df %>%
+  lmer(data = ., arousal ~ emo3 + iacc + (1|id)) %>%
+  {. ->> mdl4 } %>% 
+  summary()
+
+anova(mdl4, mdl1)
+```
+
+
+Palette for sequential colors
+
+```{r}
+library('RColorBrewer')
+knitr::opts_chunk$set(dpi=600)
+
+my_palette <- brewer.pal(name="YlGnBu",n=5)[2:6]
+```
+
+
+```{r dpi=600}
+# arousal
+id_summ <- df %>%
+  group_by(id, emo3, iacc_tile) %>%
+  summarise(id_ar = mean(arousal, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=emo3, y=arousal, color = factor(iacc_tile), group = iacc_tile)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_ar, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(data=id_summ, aes(y=id_ar), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.4) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position =  c(.3,.84),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  #scale_color_brewer(palette = "Set2") +
+  scale_color_manual(values = my_palette) +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Image category", y = "Arousal rating",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+### b. Valence
+
+```{r mdl5}
+df %>%
+  lmer(data = ., valence ~ emo3 + iacc + (1|id)) %>%
+  {. ->> mdl5 } %>% 
+  summary()
+
+anova(mdl5, mdl2)
+```
+
+
+```{r}
+# valence
+id_summ <- df %>%
+  group_by(id, emo3, iacc_tile) %>%
+  summarise(id_va = mean(valence, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=emo3, y=valence, color = factor(iacc_tile), group = iacc_tile)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_va, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(data=id_summ, aes(y=id_va), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.4) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = 'none', #c(.42,.83),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_manual(values = my_palette) +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Image category", y = "Valence rating",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+### c. HR
+
+```{r mdl6}
+df %>%
+  #mutate(iacc = iacc*10) %>%
+  lmer(data = ., hr ~ emo3  + iacc + (1|id)) %>%
+  {. ->> mdl6 } %>% 
+  summary()
+
+anova(mdl6, mdl3)
+```
+
+```{r}
+# hr
+id_summ <- df %>%
+  group_by(id, emo3, iacc_tile) %>%
+  summarise(id_hr = mean(hr, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=emo3, y=hr, color = factor(iacc_tile), group = iacc_tile)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_hr, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(data=id_summ, aes(y=id_hr), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.4) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = 'none', #c(.42,.83),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_manual(values = my_palette) +
+  #scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Image category", y = "Mean Δ Heart Rate (BPM)",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+
+
+
+
+
+
+## 3. Feedback effects
+
+
+### a. HR
+
+```{r}
+df %>%
+  lmer(data = ., hr ~ fb * iacc + (1|id)) %>%
+  {. ->> mdl7 } %>% 
+  summary()
+```
+
+```{r}
+# hr
+id_summ <- df %>%
+  group_by(id, fb, iacc_tile) %>%
+  summarise(id_hr = mean(hr, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=iacc_tile, y=hr, color = factor(fb), group = fb)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_hr, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(data=id_summ, aes(y=id_hr), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.25) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = 'none', #c(.42,.83),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_manual(values = my_palette) +
+  #scale_y_continuous(limits=c(-10,0)) + 
+  labs(
+       x = "Interoceptive Accuracy", y = "Mean Δ Heart Rate (BPM)",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+### b. Arousal
+
+```{r}
+df %>%
+  group_by(emo3, fb) %>%
+  summarize(val = mean(arousal)) 
+```
+
+```{r}
+mdl8 <- lmer(data = df, arousal ~  fb + (1|id)) 
+mdl9 <- lmer(data = df, arousal ~  fb * iacc + (1|id)) 
+mdl10 <- lmer(data = df, arousal ~  fb * hr + (1|id)) 
+mdl11 <- lmer(data = df, arousal ~  fb * iacc * hr + (1|id)) 
+
+anova(mdl8,mdl9)
+anova(mdl8,mdl10)
+anova(mdl8,mdl11)
+
+mdl12 <- lmer(data = df, arousal ~  emo3 + fb * iacc * hr  + (1|id)) 
+mdl13 <- lmer(data = df, arousal ~  emo3 * fb * iacc * hr  + (1|id)) 
+anova(mdl12,mdl13)
+summary(mdl13)
+
+```
+
+
+```{r}
+df %>%
+  lmer(data = ., arousal ~ iacc * hr * fb + (1|id)) %>%
+  {. ->> mdl14 }  %>%
+  summary()
+```
+
+```{r}
+# arousal
+id_summ <- df %>%
+  group_by(id, fb, iacc_tile) %>%
+  summarise(id_ar = mean(arousal, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=iacc_tile, y=arousal, color = factor(fb), group = fb)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_va, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(data=id_summ, aes(y=id_ar), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.25) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position =  c(.28,.89),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Interoceptive Accuracy", y = "Arousal rating",
+       color = 'Feedback') +
+  NULL
+```
+
+### c. Valence
+
+```{r}
+df %>%
+  group_by(iacc_tile, fb) %>%
+  summarize(val = mean(valence)) 
+```
+
+```{r}
+df %>%
+  lmer(data = ., valence ~ iacc * hr * fb + (1|id)) %>%
+  {. ->> mdl15 }  %>%
+  summary()
+```
+
+```{r}
+mdl16 <- lmer(data = df, valence ~  fb + (1|id)) 
+mdl17 <- lmer(data = df, valence ~  fb * iacc + (1|id)) 
+mdl18 <- lmer(data = df, valence ~  fb * hr + (1|id)) 
+mdl19 <- lmer(data = df, valence ~  fb * iacc * hr + (1|id)) 
+
+anova(mdl16,mdl17)
+anova(mdl16,mdl18)
+anova(mdl16,mdl19)
+
+
+
+mdl20 <- lmer(data = df, valence ~  emo3 + fb * iacc * hr  + (1|id)) 
+mdl21 <- lmer(data = df, valence ~  emo3 * fb * iacc * hr  + (1|id)) 
+anova(mdl20,mdl21)
+summary(mdl21)
+```
+
+
+```{r}
+# valence
+id_summ <- df %>%
+  group_by(id, fb, iacc_tile) %>%
+  summarise(id_va = mean(valence, na.rm=T))
+
+pd <- .875
+
+df %>%
+  ggplot(aes(x=iacc_tile, y=valence, color = factor(fb), group = fb)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_va, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(data=id_summ, aes(y=id_va), position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.25) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = 'none', #c(.42,.83),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Interoceptive Accuracy", y = "Valence rating",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+
+```{r}
+
+df %>%
+  drop_na() %>%
+  mutate(model_pred=predict(mdl13)) %>%
+  ggplot(aes(x=iacc_tile, y=model_pred, color = factor(fb), group = fb)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", position=position_dodge(preserve = "single", width=pd)) +
+  stat_summary(fun.data=mean_cl_boot, geom="linerange", size = 1.25, position=position_dodge(width = pd)) +  #fun.args = list(conf.int=1)
+  #geom_jitter(data=id_summ, aes(y=id_va, group=iacc_bin, position=position_dodge(width = .7)), alpha=.5, height = .2, width = .2) +
+  geom_point(position=position_jitterdodge(dodge.width=pd, jitter.height=0.1, jitter.width=0.1), alpha=.25) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 2, 
+        legend.position = 'none', #c(.42,.83),
+        legend.background = element_rect(fill=alpha('white', 0.4))) +
+  #facet_grid(.~fb) +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) + 
+  labs(
+       x = "Interoceptive Accuracy", y = "Valence rating",
+       color = 'Interoceptive\nAccuracy') +
+  NULL
+```
+
+
+=> The feedback type has an effect on arousal ratings (independent of emotion category).
+
+```{r}
+# graph
+df %>%
+  ggplot(aes(x=hr, y=arousal)) + 
+  geom_jitter(alpha=.1, height = .2, width = .2) +
+  #stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  #stat_summary(fun.data = mean_cl_boot, geom = 'pointrange') +
+  theme_linedraw() + 
+  geom_smooth(method='lm', se=F, aes(group=iacc_tile, color=factor(iacc_tile))) +
+  theme(aspect.ratio = 2) +
+  facet_grid(~fb) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  scale_color_brewer(palette='Set2') +
+  labs(title = "Arousal ratings per feedback condition and Interoceptive Accuracy",
+       x = "HR Response", y = "Arousal rating") +
+  NULL
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-------------------------------------------------------------------------------
+## 2. Correlations
+
+
+### a. Correlation : HR x arousal ratings
+
+
+```{r echo = FALSE}
+df %>%
+  summarise(coef=cor.test(hr, arousal)$estimate,
+            pval=cor.test(hr, arousal)$p.value,
+            cimin=cor.test(hr, arousal)$conf.int[1],
+            cimax=cor.test(hr, arousal)$conf.int[2],
+            n = n())
+
+
+df %>%
+  #ggplot(aes(x=scale(hr), y=scale(iacc))) +
+  ggplot(aes(x=hr, y=arousal)) +
+    geom_point(size=.2) +
+    #geom_count(aes(size = stat(prop), group = id), alpha=.5) +
+    #geom_count(alpha=.5) +
+    #scale_size_area(max_size = 2) +
+    #geom_boxplot(aes(group=factor(iacc))) +
+    geom_smooth(method='lm', se=F, size=.25, color = 'red', linetype='dashed' ) +
+    scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) +
+    theme_linedraw() +
+    theme(aspect.ratio = 1#, 
+          #legend.position = 'none'
+          ) +
+    labs(
+       x = "Δ Heart Rate (BPM)", y = "Arousal Rating") +
+    NULL
+
+```
+  
+=> not significant (for Dunn it was: r = .38) ! (limits?)
+
+### b. Correlation : HR x valence ratings
+
+```{r echo = FALSE}
+df %>%
+  summarise(coef=cor.test(hr, valence)$estimate,
+            pval=cor.test(hr, valence)$p.value,
+            cimin=cor.test(hr, valence)$conf.int[1],
+            cimax=cor.test(hr, valence)$conf.int[2],
+            n = n())
+
+df %>%
+  #ggplot(aes(x=scale(hr), y=scale(iacc))) +
+  ggplot(aes(x=hr, y=valence)) +
+    geom_point(size=.2) +
+    #geom_count(aes(size = stat(prop), group = id), alpha=.5) +
+    #geom_count(alpha=.5) +
+    #scale_size_area(max_size = 2) +
+    #geom_boxplot(aes(group=factor(iacc))) +
+    geom_smooth(method='lm', se=F, size=.25, color = 'red', linetype='dashed' ) +
+    scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) +
+    theme_linedraw() +
+    theme(aspect.ratio = 1#, 
+          #legend.position = 'none'
+          ) +
+    labs(
+       x = "Δ Heart Rate (BPM)", y = "Valence Rating") +
+    NULL
+```
+
+=> Not significant (Dunn: not significant).
+
+### c. Correlation : Interoception x HR
+
+```{r echo = FALSE}
+df %>%
+  summarise(coef=cor.test(iacc, hr)$estimate,
+            pval=cor.test(iacc, hr)$p.value,
+            cimin=cor.test(iacc, hr)$conf.int[1],
+            cimax=cor.test(iacc, hr)$conf.int[2],
+            n = n())
+
+df %>%
+  #ggplot(aes(x=scale(iacc), y=scale(hr))) +
+  ggplot(aes(x=iacc, y=hr)) +
+    geom_hline(yintercept=0, linetype='dashed') +
+    geom_point(size=.2, aes(color=iacc_tile)) +
+    #geom_count(aes(size = stat(prop), group = id), alpha=.5) +
+    #geom_count(alpha=.5) +
+    #scale_size_area(max_size = 2) +
+    #geom_boxplot(aes(group=factor(iacc))) +
+    geom_smooth(method='lm', se=F, size=1, color = 'red') +
+    #scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) +
+    theme_linedraw() +
+    scale_color_brewer(palette = "Set2") +
+    theme(aspect.ratio = 1#, 
+          #legend.position = 'none'
+          ) +
+    labs(
+       x = "Interoceptive Accuracy (IAcc)", y = "Δ Heart Rate (BPM)",
+       color='Interoceptive Accuracy') +
+    NULL
+```
+
+
+
+### d. Correlation : IAcc x arousal ratings
+
+```{r echo = FALSE}
+df %>%
+  summarise(coef=cor.test(iacc, arousal)$estimate,
+            pval=cor.test(iacc, arousal)$p.value,
+            cimin=cor.test(iacc, arousal)$conf.int[1],
+            cimax=cor.test(iacc, arousal)$conf.int[2],
+            n = n())
+
+df %>%
+  #ggplot(aes(x=scale(arousal), y=scale(iacc))) +
+  ggplot(aes(x=iacc, y=arousal)) +
+    #geom_jitter(size=.2, width = .05, height=.05) +
+    geom_count(aes(size = stat(prop), group = id, color=iacc_tile), alpha=.5) +
+    #geom_count(alpha=.5) +
+    scale_size_area(max_size = 3) +
+    #geom_boxplot(aes(group=factor(iacc))) +
+    geom_smooth(method='lm', se=F, size=1, color = 'red') +
+    scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) +
+    theme_linedraw() +
+      scale_color_brewer(palette = "Set2") +
+    theme(aspect.ratio = 1#, 
+          #legend.position = 'none'
+          ) +
+    labs(
+       x = "Interoceptive Accuracy (IAcc)", y = "Arousal Rating",
+       size = "Proportion\nper participant",
+       color = 'Interoceptive Accuracy') +
+    NULL
+```
+
+
+=> **very** significant (Dunn: not significant).
+
+### e. Correlation : Interoception x valence ratings
+
+```{r echo = FALSE}
+df %>%
+  summarise(coef=cor.test(iacc, valence)$estimate,
+            pval=cor.test(iacc, valence)$p.value,
+            cimin=cor.test(iacc, valence)$conf.int[1],
+            cimax=cor.test(iacc, valence)$conf.int[2],
+            n = n())
+
+df %>%
+  #ggplot(aes(x=scale(valence), y=scale(iacc))) +
+  ggplot(aes(x=iacc, y=valence)) +
+    #geom_jitter(size=.2, width = .05, height=.05) +
+    geom_count(aes(size = stat(prop), group = id, color=iacc_tile), alpha=.5) +
+    #geom_count(alpha=.5) +
+    scale_size_area(max_size = 3) +
+    #geom_boxplot(aes(group=factor(iacc))) +
+    geom_smooth(method='lm', se=F, size=.25, color = 'red', linetype='dashed' ) +
+    scale_y_continuous(limits=c(0,9), breaks = seq(1,9,1)) +
+    theme_linedraw() +
+      scale_color_brewer(palette = "Set2") +
+    theme(aspect.ratio = 1#, 
+          #legend.position = 'none'
+          ) +
+    labs(
+       x = "Interoceptive Accuracy (IAcc)", y = "Valence Rating",
+       size = "Proportion\nper participant",
+       color = 'Interoceptive Accuracy') +
+    NULL
+```
+
+=> not significant (for Dunn it was: r = .15 & not sig)
+
+
+## 3. Effect of the cardiac feedback on subjective ratings
+
+### a. Mixed MR ANOVA model for arousal ratings
+
+```{r include = FALSE}
+df %>%
+  group_by(emo3, fb) %>%
+  summarize(hr_resp = mean(hr)) 
+```
+
+
+
+
+
+
+```{r}
+# graph
+df %>%
+  ggplot(aes(x=fb, y=arousal, color = emo3, group = emo3)) + 
+  geom_jitter(alpha=.1, height = .2, width = .2) +
+  stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange') +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+  #facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  labs(title = "Arousal ratings per feedback condition and Interoceptive Accuracy",
+       x = "Feedback type", y = "Arousal rating") +
+  NULL
+```
+
+```{r}
+# graph
+df %>%
+  ggplot(aes(x=fb, y=arousal, color = hr, group = emo3)) + 
+  geom_jitter(alpha=.1, height = .2, width = .2) +
+  stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange') +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+  #facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  scale_color_viridis_c() +
+  labs(title = "Arousal ratings per feedback condition and Interoceptive Accuracy",
+       x = "Feedback type", y = "Arousal rating") +
+  NULL
+```
+
+```{r}
+df %>%
+  aov(data = ., arousal ~ emo3 + fb * iacc_bin + Error(id/(emo3+fb))) %>%
+  {. ->> mdl5 } %>% 
+  summary()
+```
+
+
+```{r, fig.width = 4.5, fig.height = 3, echo = FALSE}
+# graph
+df %>%
+  ggplot(aes(x=fb, y=arousal, color = emo3, group = emo3)) + 
+  geom_jitter(alpha=.15, height = .2, width = .15) +
+  stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1, legend.position="bottom") +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  labs(title = "Arousal",
+       x = "Feedback type", y = "Subjective arousal rating",
+       color = "Emotion", fill = "Emotion") +
+  NULL
+```
+
++ **Main effect** of Emotion
++ **Main effect** of IAcc
++ **Interaction** : Effect of feedback only for low IAcc (bad interoceptors)
+
+Same graph without image category separation
+
+```{r, fig.width = 4.5, fig.height = 3, echo = FALSE}
+# graph
+df %>%
+  ggplot(aes(x=fb, y=arousal, color = emo3, group = iacc_bin)) + 
+  geom_jitter(alpha=.25, height = .2, width = .15) +
+  stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1, legend.position="bottom") +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  labs(title = "Arousal",
+       x = "Feedback type", y = "Subjective arousal rating",
+       color = "Emotion", fill = "Emotion") +
+  NULL
+```
+
+#### Calculate effect sizes (Partial Eta Squares)
+
+```{r}
+library(DescTools)
+# https://rdrr.io/cran/DescTools/man/EtaSq.html
+EtaSq(mdl5, type = 1, anova=FALSE)
+```
+
+
+
+#### Assumptions check
+
+1. Errors (a.k.a. residuals) are normally distributed  (qqnorm and hist)
+2. Variances are homogeneous (heteroscedasticity) : Verified using Levene's Test
+for Homogeneity of Variances
+3. Model effects are additive · Verified using the Tukey 1-df Test for Nonadditivity
+4. Errors are independent
+
+```{r include=FALSE}
+# need to use proj() and then to look for the within-subj error residuals
+projected <- proj(mdl5)
+summary(projected)  # look at the last error and note the index ([[5]])
+
+# 1. Check for normality by using last error stratum
+qqnorm(projected[[5]][, "Residuals"])
+hist(projected[[5]][, "Residuals"])
+# 2. Check for heteroscedasticity by using last error stratum
+plot(projected[[5]][, "Residuals"])
+# 3. Additive effects : 
+
+# 4. RM error term is used.
+```
+
+
+### b. Linear Mixed Model for arousal ratings
+
+Run the same analysis but using a linear mixed model (might be more adequate
+than ANOVAs https://www.r-bloggers.com/how-to-do-repeated-measures-anovas-in-r/)
+
+```{r}
+df %>%
+  lmer(arousal ~ emo3 + fb * iacc_bin + (1|id), data=., REML=TRUE) %>%
+  {. ->> mdl6 } %>% 
+  summary()
+```
+
+Plot mixed linear model fit
+
+```{r, fig.width = 4.5, fig.height = 3, echo = FALSE}
+df$mdl6 <- predict(mdl6)
+
+# graph
+df %>%
+  ggplot(aes(x=fb, y=mdl6, color = emo3, group = emo3)) + 
+  geom_jitter(alpha=.25, height = .2, width = .15) +
+  #stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +
+  geom_smooth(aes(y=mdl6), method = 'lm', se=FALSE, alpha = .5) + 
+  theme_linedraw() + 
+  theme(aspect.ratio = 1, legend.position="bottom") +
+  facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  labs(title = "Arousal : linear mixed model prediction",
+       x = "Feedback type", y = "Subjective arousal rating") +
+  NULL
+```
+
+### c. Mixed MR ANOVA model for valence ratings
+
+```{r }
+df %>%
+  aov(data = ., valence ~ emo3 + fb * iacc_bin + Error(id/(emo3+fb))) %>%
+  {. ->> mdl7 } %>% 
+  summary()
+```
+
+=> No effects (as predicted)
+
+=> No **main effect** of Emotion
+=> No **Main effect** of IAcc
+=> No **Interaction** : Effect of feedback only for low IAcc (bad interoceptors)
+
+Plot on a graph:
+
+```{r, fig.width = 4.5, fig.height = 3, echo = FALSE}
+df %>%
+  ggplot(aes(x=fb, y=valence, color = emo3, group = emo3)) + 
+  geom_jitter(alpha=.15, height = .2, width = .15) +
+  stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1, legend.position="bottom") +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  labs(title = "Valence",
+       x = "Feedback type", y = "Valence rating",
+       color = "Emotion", fill = "Emotion") +
+  NULL
+```
+
+Same graph without image category separation
+
+```{r, fig.width = 4.5, fig.height = 3, echo = FALSE}
+# graph
+df %>%
+  ggplot(aes(x=fb, y=valence, color = emo3, group = iacc_bin)) + 
+  geom_jitter(alpha=.25, height = .2, width = .15) +
+  stat_summary(fun.data = mean_cl_boot, geom = 'line') +
+  stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1, legend.position="bottom") +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  facet_grid(~iacc_bin) +
+  scale_y_continuous(breaks = seq(1,9,1)) + 
+  labs(title = "Arousal",
+       x = "Feedback type", y = "Subjective arousal rating",
+       color = "Emotion", fill = "Emotion") +
+  NULL
+```
+
+
+### d. Linear Mixed Model for arousal ratings
+
+```{r}
+df %>%
+  lmer(valence ~ emo3 + fb * iacc_bin + (1|id), data=., REML=TRUE) %>%
+  {. ->> mdl8 } %>% 
+  summary()
+```
+
+
+### Assumptions check for linear mixed model
+
+1. Linearity and homoskedasticity 
+- **Linearity**: the pattern in the results should not be non-linear (e.g. a U-shape, curvy pattern, etc)
+- **Homoskedasticity**: "the residuals of your model need to roughly have a similar amount of deviation from your predicted values." 
+2. **Collinearity** : A VIF factor of 1 indicates no collinearity. Larger VIF factors (>2) are problematic.
+3. **Normality of residuals** : The histogram should show a normal distribution (bell shape) around 0, and the QQ-plot should show points falling on the diagnonal.
+4. **Influential points** : Use `Influence.ME` package
+5. **Independence** : Mixed model is used to take into account non-independence of values (per subject, per session, etc).
+
+```{r include = FALSE}
+plot(residuals(mdl8))
+hist(residuals(mdl8))
+qqnorm(residuals(mdl8))
+```
+
+```{r}
+# Adapted VIF function from [here](https://github.com/aufrank/R-hacks/blob/master/mer-utils.R).
+vif.mer <- function (fit) {
+## adapted from rms::vif
+v <- vcov(fit)
+nam <- names(fixef(fit))
+## exclude intercepts
+ns <- sum(1 * (nam == "Intercept" | nam == "(Intercept)"))
+if (ns > 0) {
+v <- v[-(1:ns), -(1:ns), drop = FALSE]
+nam <- nam[-(1:ns)] }
+d <- diag(v)^0.5
+v <- diag(solve(v/(d %o% d)))
+names(v) <- nam 
+v }
+
+# Apply function to our model
+vif.mer(mdl8)
+```
+
+### Results
+
+1. Manipulation check of arousal induction
+  a. Image category (pos, neg, neutral) will influence arousal ratings : Within-subject ANOVA (arousal ~ category)
+  **OK.**
+  b. Image category (pos, neg, neutral) will influence valence ratings : Within-subject ANOVA (valence ~ category)
+  **OK.**
+  c. Image category (pos, neg, neutral) will influence HR deceleration : Within-subject ANOVA (hr ~ category)
+  **KO.**
+2.
+  a. HR is correlated with arousal ratings : Pearson's correlation (hr x arousal)
+  **KO.**
+  b. HR is not correlated with valence ratings : Pearson's correlation (hr x valence)
+  **OK**
+  c. Interoceptive Accuracy (IAcc) is not correlated with arousal ratings : Pearson's correlation (IAcc x arousal)
+  **KO.**
+  d. Interoceptive Accuracy (IAcc) is not correlated with valence ratings : Pearson's correlation (IAcc x valence)
+  **OK**
+
+3. Cardiac feedback
+  a. Feedback effect on arousal ratings (interaction with IAcc) : Mixed MR ANOVA model (arousal ~ category + feedback * IAcc )
+  **OK**
+  b. No feedback effect on valence ratings : Mixed MR ANOVA model (valence ~ category + feedback * IAcc )
+  **OK**
+Alternative:
+
+  c. Linear Mixed Model (arousal ~ category + feedback * IAcc + (1|id))
+  **OK**
+  d. Linear Mixed Model (valence ~ category + feedback * IAcc + (1|id))
+  **OK**
+
+
+
+# Interpretation
+
+- perhaps effect is present but not due to synchronicity (just to feedback itself) : need a baseline (Limit 1)
+- perhaps feedback is not precise enough, or to adjust delays for each person
+- perhaps HR measure is not precise enough (I averaged over a time window ) (since i fail to show different deceleration per emotion, so manipulation not completely effective)
+- IAcc criticized (I acquired control for Depression, Anxiety, but not analysed).
+
+------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Extras
+
+## Summary
+
+Summarise in a table
+
+```{r}
+df %>% 
+  group_by(id, fb, emo3) %>%
+  #filter(!is.na(iacc_bin)) %>%
+  summarize(mean = mean(arousal, na.rm = T), # mean
+            se = sd(arousal, na.rm = T)/ sqrt(n()),  # standard error
+            n = n(),
+            ia = mean(iacc)
+  )
+```
+
+## Calculate HR x Rating correlations
+
+Compute correlations between arousal ratings and the heart rate (as psc).
+
+```{r}
+df %>%
+  group_by(id,fb) %>%
+  # [     z score correlation estimates     ] %>%
+  summarise(coef=cor.test(psc, arousal)$estimate,
+            pval=cor.test(psc, arousal)$p.value,
+            cimin=cor.test(psc, arousal)$conf.int[1],
+            cimax=cor.test(psc, arousal)$conf.int[2],
+            nn = n())
+```
+
+```{r}
+df %>%
+  group_by(iacc_bin) %>%
+  # [     z score correlation estimates     ] %>%
+  summarise(n = n()/50)
+```
+
+```{r}
+df %>%
+  group_by(id,fb,emo3) %>%
+  # [     z score correlation estimates     ] %>%
+  summarise(trials = n(),
+            missing = 50 - n()) #%>%
+  #mutate(keep = case_when(missing > 5 ~ 'exclude'))
+
+#higher than 3 missing?
+# 3(7,12), 9 (9,15), 23 (7,9), 30 (0,5), 35 (16,11), 36 (10,14), 37 (5,3), 38 (4,2), 49(5,1), 51(4,10),54(4,2), 57 (8,2)
+#3,9,23,30,35,36,37,38,49,51,54,57  (12) > 5
+#-> 3,9,23,35,36,37,51,57  > 6
+
+#38, 49
+```
+
+# Visualise HR for each participant
+
+```{r, fig.width = 4, fig.height = 5}
+df %>%
+  group_by(id,fb,emo3) %>%
+  na.omit() %>%
+  #[ remove outliers in psc ] %>%
+  summarise(hr = mean(psc)) %>%
+  ggplot(aes(x=emo3, y = hr)) + 
+    geom_boxplot() + 
+    facet_wrap(~id)
+```
+
+T-test on the differences:
+
+```{r}
+df %>% 
+  group_by(iacc_bin, id, emo3) %>%
+  mutate(diff = mean(arousal[fb=='async']) - mean(arousal[fb=='sync'],
+            n = n())) %>%
+  summarise(means = mean(diff)) %>%
+  t.test(data = ., means ~ iacc_bin,  alternative = "two.sided", paired = FALSE)
+```
+
+```{r, include=FALSE}
+df %>% 
+  group_by(iacc_bin, id, emo3) %>%
+  summarise(diff = mean(arousal[fb=='async']) - mean(arousal[fb=='sync'])) %>%
+  ggplot(aes(y=diff, x = iacc_bin, color=emo3)) + 
+    geom_jitter(width=.1, height=.1) + 
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +
+    NULL
+```
+

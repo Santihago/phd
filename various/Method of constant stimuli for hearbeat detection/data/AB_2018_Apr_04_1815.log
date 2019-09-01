@@ -1,0 +1,6 @@
+1.0465 	WARNING 	Monitor specification not found. Creating a temporary one...
+1.6506 	EXP 	Created window1 = Window(allowGUI=True, allowStencil=False, args=UNKNOWN, autoLog=True, bitsMode=UNKNOWN, blendMode='avg', color=array([0., 0., 0.]), colorSpace='rgb', fullscr=UNKNOWN, gamma=None, kwargs=UNKNOWN, lms=UNKNOWN, monitor=<psychopy.monitors.calibTools.Monitor object at 0x111067190>, multiSample=False, name='window1', numSamples=2, pos=[480, 120], screen=0, size=array([1600, 1200]), stereo=False, units='pix', useFBO=False, useRetina=True, viewOri=0.0, viewPos=None, viewScale=None, waitBlanking=True, winType=u'pyglet')
+1.6970 	EXP 	Created unnamed TextStim = TextStim(alignHoriz='center', alignVert='center', antialias=True, autoLog=True, bold=False, color='black', colorSpace='named', contrast=1.0, depth=0, flipHoriz=False, flipVert=False, font='', fontFiles=[], height=15, italic=False, name='unnamed TextStim', opacity=1.0, ori=0.0, pos=array([0., 0.]), rgb=array([0., 0., 0.]), text='Simultaneous (y) or Not simultaneous (n)?', units='pix', win=Window(...), wrapWidth=500)
+1.7153 	EXP 	Set  sound=G
+1.8355 	EXP 	New trial (rep=0, index=0): []
+1.8450 	EXP 	window1: mouseVisible = True

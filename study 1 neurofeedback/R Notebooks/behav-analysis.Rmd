@@ -1,0 +1,2056 @@
+---
+author: "Santiago Muñoz Moldes"
+title: "Neurofeedback self-rating : model and visualisation with R"
+---
+
+```{r, include=F}
+library(reshape2)
+library(lmerTest)
+library(plotrix)
+library(tidyverse)
+# install.packages("devtools"); devtools::install_github("thomasp85/patchwork")
+library(patchwork) # https://www.r-exercises.com/2018/05/25/how-to-plot-with-patchwork/
+library(ggridges)
+library(colorblindr)
+library("tidylog", warn.conflicts = FALSE)
+```
+
+```{r include=FALSE}
+# Setup colors for ggplot2
+target.labels = c("60 %", "90 %")
+target.colors <- c("6" = "#D95F02", "9" ="#1C9E77")
+#target.colors <- c("6" = "#ead15d", "9" ="#52d273")
+#session.colors <- c("1" = "#0072b2", "2" = "#e0634d", "3" ="#0a9e2a")
+#session.labels <- c("1" = "Session 1", "2" = "Session 2", "3" ="Session 3")
+#session.labels <- c("early" = "Early trials", "late" = "Late trials")
+```
+
+Open notebook of analyses for the self-rating model of neurofeedback performance self-evaluations. I will use R with lme4 for mixed models, and ggplot2 for visualisation.
+
+# Introduction
+
+In this fMRI experiment, in each trial participants rate their neurofeedback self-regulation (*rating*, a value from 1 to 12), before seeing the real neurofeedback (*bold*, a value from 1 to 12). We will also calculate for the analysis a running average of neurofeedback values in previous trials, which will constitute a *prior* for their rating. We want to find out if ratings are predicted by only their prior, or by the prior + the real neurofeedback .
+
+In each trial, participants have a *target level* that they need to reach (6 or 9, on the 12-point scale). This is **not** used as a predictor for the rating (although it has huge influence), because *ratings* and *SMA* will be centered around this target level, and thus all values (ratings and bold) are centered around the target level.
+
+Some resources that have been of help:
+
+* [Mixed Models Tutorial](http://www.bodowinter.com/tutorial/bw_LME_tutorial2.pdf)  (Provided by Renzo)
+* [Collinearity in MM]((https://github.com/aufrank/R-hacks/blob/master/mer-utils.R)) (Provided by Kobe) 
+* [Data manipulation with dplyr](https://www.rstudio.com/wp-content/uploads/2015/02/data-wrangling-cheatsheet.pdf)  
+* [R's lmer syntax tips](https://stats.stackexchange.com/questions/13166/rs-lmer-cheat-sheet/13173#13173)  
+
+## Installation
+
+### Required packages  
+
+(You can install them on RStduio with the command `install.packages("packagename")`).
+
+* tidyverse: includes ggplot2, dplyr, tydr and others
+  + dplyr : for subsetting, summarizing, rearranging, and joining together data sets
+  + ggplot2 : for creating plots
+* patchwork and ggridges: additional tools for ggplot2
+* lme4 : for running mixed models
+* lmerTest : additional tools for lme4
+* plotrix : for visualising the dataset structure (optional)
+* influence.ME : for finding influential points in the Mixed Model (Nieuwenhuis, te Grotenhuis, & Pelzer, 2012).
+  
+### Download data
+
+Data ("master.csv") can be downloaded from [here](https://www.dropbox.com/s/ec020ibetjv95z5/master.csv?dl=1) (Right-click > Save Link As...). It can be loaded directly in R using the url.
+
+```{r}
+# Find different datasets
+P2_to_P8_raw <- read_csv("https://www.dropbox.com/s/gbbyzu3qq8w4pen/master.csv?dl=1")
+P2_to_P8 <- P2_to_P8_raw %>% select(-"rown")  # remove rownames column
+P09 <- read_csv("https://www.dropbox.com/s/2ozqk5ni4h75g98/P09_allfmriruns.csv?dl=1") 
+P10 <- read_csv("https://www.dropbox.com/s/yr96jstyqao30qj/P10_allfmriruns.csv?dl=1") 
+P11 <- read_csv("https://www.dropbox.com/s/g50u0xe5efxecwg/P11_allfmriruns.csv?dl=1") 
+# Merge together
+master <- bind_rows(P2_to_P8, P09, P10, P11)
+```
+
+# Data pre-processing
+
+
+Use `transmute()` to select and rename the variables we will need and assign them to a new dataframe `d`.
+
+```{r}
+included <- c(2,4,5,6,7,8,9,11)
+
+df <- master %>% 
+  transmute(
+    id = subject_id,
+    session = Session,
+    run = Run,
+    trial_in_run = TrialNr+1,
+    ctrl = Control,
+    cond = Target,
+    #level = as.factor(NUMTARGET),
+    fb = FB,
+    rating = FinalRating,
+    conf = FinalConf
+    #trial = REALTRIAL,
+    #bold = FB2TARGET,
+    #prior = FBPRIOR,
+    #rating = RATING2TARGET,
+    #error = RATING2FB
+    ) %>%
+  filter(id %in% included)
+```
+
+
+Visualise the structure of the clean dataset using `plotrix` package. Note that 18 `control` trials have been removed per participant.
+
++ **id** : Participant identifier number (162 trials per participant)
++ **session** : 3 sessions per participant (54 trials per session)
++ **run** : 6 runs per session (9 trials per run) (except P9)
+
+```{r}
+library(plotrix)
+sizetree(df[,c(1:3)])
+```
+
+
+
+Add continuous trial number for grouped days (not all participants completed all runs)
+
++ **trial** (int) : A continous trial number for the 180 trials of each participant 
++ **target** (num) : The target level as numerical value (6 or 9), as used in the experiment
++ **fb_2_target** (num) : Neurofeedback centered around the target level
++ **rating_clean** (int) : Ratings after removing control trials (where rating was forced)
++ **rating_2_target** (num) : Ratings centered around the target level
++ **rating_2_fb** (num) : Ratings centered around the neurofeedback value
+
+```{r}
+df <- df %>% 
+  group_by(id) %>% 
+  mutate(trial = row_number())
+```
+
+More
+
+```{r}
+df <- df %>%
+  mutate(target = case_when(cond == 1 ~ 6,
+                            cond == 2 ~ 9)) %>%
+  mutate(fb_2_target = fb - target) %>%
+  mutate(rating_clean = case_when(ctrl == 1 ~ NA_real_, 
+                                  TRUE ~ rating)) %>%  # Replace control trials by NA (it evaluates in order)
+  mutate(rating_2_target = rating_clean - target) %>%
+  mutate(rating_2_fb = rating_clean - fb)
+```
+
+
+
+### Density plots per run
+
+ggridges examples: https://cran.r-project.org/web/packages/ggridges/vignettes/gallery.html
+
+```{r eval = F}
+df %>%
+  mutate(RUN = factor(run, levels = rev(unique(run)))) %>% # Invert order of Y axis categories
+  ggplot(aes(x=fb_2_target, y=RUN, fill=as.factor(target))) +
+    geom_vline(xintercept=0, linetype='dashed') +
+    geom_density_ridges(scale=1.5, size = .25, alpha = .3, rel_min_height = 0.05) +
+    #scale_color_brewer(palette = "Dark2") +
+    #scale_fill_brewer(palette = "Dark2") +
+    scale_fill_manual(labels=target.labels, values = target.colors) +
+    theme_bw() + #them_ridges() + 
+    theme(legend.position = 'right') +
+    scale_x_continuous(limits = c(-9,6)) +
+    labs(title = "Self-regulation progress",
+       subtitle = "Average density plot per run",
+       #caption = "Figure 3.", 
+       x = "Self-regulation offset", y = "Run") +
+  NULL
+```
+
+
+Remove rating outliers.
+
+```{r}
+#d_clean <- d %>%
+#  filter(rating<5 & rating>-5)
+```
+
+### Self-regulation per session
+
+```{r}
+session_summaries <- df %>%
+  group_by(target, session) %>%
+  summarize(mean = mean(fb_2_target, na.rm = T),
+            sd = sd(fb_2_target, na.rm = T),
+            se = sd(fb_2_target, na.rm = T) / sqrt(n())) %>%
+  ungroup()
+
+g1 <- session_summaries %>%
+  mutate(target = as.factor(target)) %>%
+  ggplot(aes(x=session, y=mean, fill=target)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-sd, ymax=mean+sd), size = .5) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd), alpha = .2) +
+  geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  scale_y_continuous(limits = c(-6,6)) + 
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+  scale_fill_manual(labels=target.labels, values = target.colors, guide=FALSE) + 
+  facet_grid(target~.) +
+  labs(title = "Self-regulation performance",
+       subtitle = "Average + standard deviation per session",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Mean self-regulation offset") +
+  NULL
+
+session_summaries <- df %>% 
+  group_by(session) %>%
+  summarize(mean = mean(fb_2_target, na.rm = T),
+            sd = sd(fb_2_target, na.rm = T),
+            se = sd(fb_2_target, na.rm = T) / sqrt(n()))
+
+g2 <- session_summaries %>%
+  ggplot(aes(x=session, y=mean)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-sd, ymax=mean+sd), size = .5) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd), alpha = .2) +
+  geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  scale_y_continuous(limits = c(-6,6)) + 
+  scale_fill_manual(labels=target.labels, values = target.colors, guide=FALSE) +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+  labs(title = "Self-regulation around target levels accross sessions",
+       subtitle = "Average + standard deviation per session",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Mean self-regulation offset") +
+  NULL
+
+(g1 + g2)
+```
+
+
+#### Self-regulation per trial
+
+
+```{r}
+df %>% 
+  ggplot(aes(x=trial, y=abs(fb_2_target), group=session)) + 
+    geom_hline(yintercept=0, linetype = "dotted") +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    geom_smooth(aes(group=interaction(target, session), color=target, fill=target), se=F, method='lm', span = .7, size=.5) + 
+    geom_smooth(method='lm', color='black', span = .7, size=.75, se=F, linetype="twodash") + 
+    #scale_color_brewer(palette = "Dark2") +
+    facet_wrap(id~., ncol=4) +
+    scale_y_continuous(limits = c(0, 6), breaks = seq(-6, 6, by=1)) + 
+    theme_linedraw() +
+    labs(title = "Self-regulation distance to target",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Trial", y = "Abs Δ with target")
+
+```
+
+#### Graph with average error value per run
+
+```{r}
+df %>% 
+  ggplot(aes(x=run, y=abs(fb_2_target), group=session, shape=factor(session))) + 
+    geom_hline(yintercept=0, linetype = "dotted") +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    stat_summary(alpha=.4) +
+    geom_smooth(aes(group=interaction(target, session), color=target, fill=target), se=F, method='lm', span = .7, size=.5) + 
+    geom_smooth(method='lm', color='black', span = .7, size=.75, se=T, linetype="solid") + 
+    #scale_color_brewer(palette = "Dark2") +
+    facet_wrap(id~., ncol=4) +
+    scale_y_continuous(limits = c(0, 6), breaks = seq(-6, 6, by=1)) + 
+    theme_linedraw() +
+    labs(title = "General self-regulation error",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Run", y = "Abs Δ with target")
+
+```
+
+
+```{r}
+df %>% 
+  ggplot(aes(x=run, y=fb_2_target, group=session, shape=factor(session))) + 
+    geom_hline(yintercept=0, linetype = "dotted") +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    stat_summary(alpha=.4) +
+    #geom_smooth(aes(group=interaction(level, session), color=level, fill=level), se=F, method='lm', span = .7, size=.5) + 
+    geom_smooth(method='lm', color='black', span = .7, size=.75, se=T, linetype="solid") + 
+    #scale_color_brewer(palette = "Dark2") +
+    facet_wrap(id~., ncol=4) +
+    #scale_y_continuous(limits = c(0, 6), breaks = seq(-6, 6, by=1)) + 
+    theme_linedraw() +
+    labs(title = "General self-regulation error",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Run", y = "Abs Δ with target")
+
+```
+
+
+```{r}
+df %>% 
+  ggplot(aes(x=factor(session), y=fb, group=target, color=as.factor(target))) + 
+    geom_hline(yintercept=6, linetype = "dashed", color='orange') +
+    geom_hline(yintercept=9, linetype = "dashed", color='darkgreen') +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    stat_summary(alpha=.75) +
+
+    #geom_smooth(aes(group=interaction(target, session), color=target, fill=target), se=F, method='lm', span = .7, size=.5) + 
+    geom_smooth(method='lm', span = .7, size=.75, se=F, linetype="solid") + 
+    #scale_color_brewer(palette = "Dark2") +
+    scale_fill_manual(labels=target.labels, values = target.colors) +
+    scale_color_manual(labels=target.labels, values = target.colors) +
+    facet_wrap(id~., ncol=4) +
+    scale_y_continuous(limits = c(0, 12), breaks = seq(0, 12, by=1)) + 
+    theme_linedraw() +
+    labs(title = "General self-regulation",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Session", y = "Feedback")
+
+```
+
+```{r}
+df %>% 
+  ggplot(aes(x=factor(session), y=fb, fill=as.factor(target))) + 
+    geom_hline(yintercept=6, linetype = "dashed", color='darkorange') +
+    geom_hline(yintercept=9, linetype = "dashed", color='darkgreen') +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    #geom_bar(stat="summary", fun.y = "mean", position = "dodge", fill = "white") +
+    geom_violin(position=position_dodge(width=.7), color=NA, width=1.3, alpha=.4) +
+    stat_summary(fun.data="mean_sdl", fun.args = list(mult=1), 
+                 geom="pointrange", position = position_dodge(width=.7)) +
+
+    #geom_smooth(aes(group=interaction(level, session), color=level, fill=level), se=F, method='lm', span = .7, size=.5) + 
+    #geom_smooth(aes(group=level, color=level), method='lm', span = .7, size=.75, se=F, linetype="solid") + 
+    #scale_color_brewer(palette = "Dark2") +
+    scale_fill_manual(labels=target.labels, values = target.colors) +
+    scale_color_manual(labels=target.labels, values = target.colors) +
+    facet_wrap(id~., ncol=4) +
+    scale_y_continuous(limits = c(0, 12.5), breaks = seq(0, 12, by=3)) + 
+    theme_minimal() +
+    labs(title = "General self-regulation",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Session", y = "Self-regulation value",
+       fill = "Level", color = "Level")
+```
+
+
+```{r}
+#https://stackoverflow.com/questions/35717353/split-violin-plot-with-ggplot2
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+
+```
+
+```{r dpi = 600}
+df %>% 
+    mutate(target = factor(target, levels = c(9,6), labels = c("90%", "60%"))) %>%
+  ggplot(aes(x=factor(session), y=fb, fill=as.factor(target))) + 
+    geom_hline(yintercept=0, linetype = "dashed", color='black') +
+    geom_hline(yintercept=6, linetype = "dashed", color='darkorange') +
+    geom_hline(yintercept=9, linetype = "dashed", color='darkgreen') +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    #geom_bar(stat="summary", fun.y = "mean", position = "dodge", fill = "white") +
+    geom_split_violin(aes(x=factor(session), y=fb, fill = as.factor(target)), color=NA, alpha=.4, width=1.1, trim=T) +
+    stat_summary(fun.data="mean_cl_boot", fun.args = list(conf.int=1), 
+                 geom="pointrange", position = position_dodge(width=.3), size=.3) +
+
+    #geom_smooth(aes(group=interaction(level, session), color=level, fill=level), se=F, method='lm', span = .7, size=.5) + 
+    #geom_smooth(aes(group=level, color=level), method='lm', span = .7, size=.75, se=F, linetype="solid") + 
+    #scale_color_brewer(palette = "Dark2") +
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+    facet_wrap(id~., ncol=4) +
+    scale_y_continuous(limits = c(0, 12), breaks = seq(0, 12, by=3)) + 
+    theme_minimal() +
+    theme(legend.position = "right", 
+          aspect.ratio = 1,
+          axis.text = element_text(size=14),
+          axis.title = element_text(size=14)) +
+    #ylim(0, 11) +
+    labs(
+       #title = "General self-regulation",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Session", y = "Self-regulation value",
+       fill = "Target\nLevel", color = "Target\nLevel")
+```
+
+
+Group graph
+
+Create summaries to calcualte within-subject CIs
+```{r  fig.height=2}
+# Within-subject error bars: http://www.cogsci.nl/blog/tutorials/156-an-easy-way-to-create-graphs-with-within-subject-error-bars
+group_session_summary <- df %>% 
+  group_by(session, cond) %>%
+  mutate(group_avg = mean(fb)) %>%
+  group_by(id, session, cond) %>%
+  mutate(avg = mean(fb),
+         new_val = fb - avg + group_avg) %>% #new value = old value – subject average + grand average
+  group_by(session, cond) %>%
+  mutate(sd = sd(new_val, na.rm = T),
+         se = sd(new_val, na.rm = T) / sqrt(8),  # standard error
+         ci = se * 1.96) # standard error
+   
+group_session_summary %>%
+      mutate(target = factor(target, levels = c(9,6), labels = c("90%", "60%"))) %>%
+  ggplot(aes(x=factor(session), y=fb, fill=as.factor(target))) +  
+    geom_hline(yintercept=0, linetype = "dashed", color='black') + 
+    geom_hline(yintercept=6, linetype = "dashed", color='#D95F02', size = .8) +
+    geom_hline(yintercept=9, linetype = "dashed", color='#1C9E77', size = .8) +
+    #geom_jitter(size = .7, width = .2, height = .2, alpha = .4) +
+    #geom_bar(stat="summary", fun.y = "mean", position = "dodge", fill = "white") +
+    geom_split_violin(aes(x=factor(session), y=fb, fill = as.factor(target)), color=NA, alpha=.4, width=1., trim=T) +
+    stat_summary(fun.data="mean_cl_boot",   fun.args = list(conf.int=1), #divide sd by 8 and multiply by 1.96 for CI?
+                geom="pointrange", position = position_dodge(width=.5), size=.4) +
+    # Manual Within-Subject Error Bars:
+    #geom_linerange(aes(ymin=group_avg-ci, ymax = group_avg+ci, group = target), position = position_dodge(width=.5), size = .75) +
+    #geom_point(aes(y=group_avg, group = target), position = position_dodge(width=.5), size = 3) +
+    #geom_smooth(aes(group=interaction(level, session), color=level, fill=level), se=F, method='lm', span = .7, size=.5) + 
+    #geom_smooth(aes(group=level, color=level), method='lm', span = .7, size=.75, se=F, linetype="solid") + 
+    #scale_color_brewer(palette = "Dark2") +
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+    #facet_wrap(id~., ncol=4) +
+    scale_y_continuous(limits = c(0, 12), breaks = seq(0, 12, by=3)) + 
+    theme_minimal() +
+    theme(aspect.ratio = 1, 
+          legend.position = "none",
+          axis.text = element_text(size=14),
+          axis.title = element_text(size=14)
+          ) +
+    labs(
+       #title = "General self-regulation",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "Session", y = "Self-regulation value",
+       fill = "Target Level", color = "Target Level")
+```
+
+Patchwork
+
+```{r eval=F}
+(gs + is) + plot_layout(ncol = 2, widths=c(1., 1.75)) + plot_annotation(tag_levels = 'A') 
+
+```
+
+
+#### ANOVA
+
+RM 
+2 (level) x 3 (session)
+
+```{r}
+
+# GROUP ANOVA
+
+df %>%
+  aov(data = ., fb ~ (session * target) + Error(id/(session*target))) %>%
+  {. ->> regu_anova_group } %>% 
+  summary()
+
+# EXPORT RM ANOVA as summary 1 participants = 1 row
+df_group_summary <- df %>%
+  group_by(id, target, session) %>%
+  summarise(mean(fb)) 
+#Reshape
+wide_group_summary <- dcast(df_group_summary, id ~ session + target)
+write_csv(wide_group_summary, "/Users/santiago/Desktop/wide_group_summary.csv")
+
+# EXPORT same but with with error data
+df_group_summary_error <- df %>%
+  group_by(id, target, session) %>%
+  summarise(mean(fb_2_target)) 
+#Reshape
+wide_group_summary_error <- dcast(df_group_summary_error, id ~ session + target)
+write_csv(wide_group_summary_error, "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/jasp_analysis/wide_group_summary_error.csv")
+```
+
+```{r}
+df %>%
+  select(id,session,target,fb_2_target) %>%
+  write_csv(., "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/jasp_analysis/df_error.csv")
+```
+
+```{r}
+# GROUP MIXED-EFFECTS MODEL
+group_lmme <- lmerTest::lmer(fb ~ 1 + session + target + target:session + (1  + session + target + target:session | id), data=df)
+summary(group_lmme)
+#write_csv(df, "/Users/santiago/Desktop/df.csv")
+```
+
+```{r}
+
+# INDIVIDUAL ANOVA's
+
+df %>%
+  filter(id==11) %>%
+  aov(data = ., fb ~ session * target ) %>%
+  {. ->> regu_anova_id_11 } %>% 
+  summary()
+df %>%
+  filter(id==11) %>%
+  {. ->> d_id_11} %>% 
+  lm(data = ., fb ~ session * target ) %>%
+  {. ->> regu_lm_id_11} %>% 
+  summary()
+
+
+df_11 <- df %>%
+  filter(id==11) %>%
+  select(id,session,target,fb)
+#write_csv(df_11, "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/jasp_analysis/df_11.csv")
+```
+
+Individul t-tests for each session
+
+Uni-directional and divide alpha by 3. because we don't know where in the three to expect diff. But not 3 x 8 because sig in one person doesn't tell anything about another.
+
+```{r}
+df %>%
+  select(id, session, target, fb) %>%
+  group_by(id, session) %>%
+  summarise(stat=t.test(fb[target=="9"], fb[target=="6"], alternative="greater", paired =TRUE, data=.)$statistic,
+            pval=t.test(fb[target=="9"], fb[target=="6"], alternative="greater", paired =TRUE, data=.)$p.value) %>%
+  mutate(pvall = round(pval,3)) %>%
+  mutate(padj = round(pval * 3, 5))
+                                 
+# GROUP
+
+df %>%
+  select(session, target, fb) %>%
+  group_by(session) %>%
+  summarise(stat=t.test(fb[target=="9"], fb[target=="6"], alternative="greater", paired =TRUE, data=.)$statistic,
+            pval=t.test(fb[target=="9"], fb[target=="6"], alternative="greater", paired =TRUE, data=.)$p.value) %>%
+  mutate(pvall = round(pval,3)) %>%
+  mutate(padj = round(pval * 3, 5))
+                                 
+                                 
+```
+
+
+# Correlations
+
+Each id, each session, calcualte correlation L6-L9:
+
+
+
+```{r}
+
+# INDIVIDUAL LEVEL
+
+df %>%
+  select(id, session, target, fb) %>%
+  group_by(id, session) %>%
+  summarise(coef=format(cor.test(target, 
+                                 fb, 
+                                 alternative = "greater", 
+                                 method = "pearson")$estimate, 
+                        digits = 3, 
+                        nsmall = 3),
+            pval=format(cor.test(target, 
+                                 fb, 
+                                 alternative = "greater", 
+                                 method = "pearson")$p.value, 
+                        scientific=F, 
+                        digits = 3, 
+                        nsmall = 3),
+            cimin=cor.test(target, 
+                           fb, 
+                           alternative = "greater", 
+                           method = "pearson")$conf.int[1],
+            cimax=cor.test(target, 
+                           fb, 
+                           alternative = "greater", 
+                           method = "pearson")$conf.int[2])
+
+
+# GROUP LEVEL
+df %>%
+  select(id, session, target, fb) %>%
+  group_by(session) %>%
+  summarise(coef=format(cor.test(target, 
+                                 fb, 
+                                 alternative = "greater", 
+                                 method = "pearson")$estimate, 
+                        digits = 3, 
+                        nsmall = 3),
+            pval=format(cor.test(target, 
+                                 fb, 
+                                 alternative = "greater", 
+                                 method = "pearson")$p.value, 
+                        scientific=F, 
+                        digits = 3, 
+                        nsmall = 3),
+            cimin=cor.test(target, 
+                           fb, 
+                           alternative = "greater", 
+                           method = "pearson")$conf.int[1],
+            cimax=cor.test(target, 
+                           fb, 
+                           alternative = "greater", 
+                           method = "pearson")$conf.int[2])
+
+
+```
+
+### Density plots per half
+
+Adding mean and quartiles: https://cran.r-project.org/web/packages/ggridges/vignettes/introduction.html
+
+To-Do: 
+- Use real PSC values, because here FB values are limited between 0 and 12, which sets the maximum dev of level 9 trials to +3. 
+
+```{r eval=FALSE}
+df_ratings %>%
+  mutate(TIME = factor(time, levels = rev(unique(time)))) %>% # Invert order of Y axis categories
+  ggplot(aes(x=bold, y=TIME, fill=level, color = level)) +
+  geom_vline(xintercept=0, linetype='dashed') +
+  geom_density_ridges(scale=.9, 
+                      size = 0.5, 
+                      alpha = .3, 
+                      rel_min_height = 0.05, 
+                      jittered_points=TRUE, 
+                      point_shape = "*", 
+                      point_size = 3, 
+                      position = position_points_jitter(height = 0.1, width = 0.1), 
+                      quantile_lines = TRUE, 
+                      quantiles = 2
+                      ) +
+  #scale_color_brewer(palette = "Dark2") +
+  #scale_fill_brewer(palette = "Dark2") +
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  scale_fill_manual(labels=target.labels, values = target.colors) +
+  theme_bw() + #them_ridges() + 
+  theme(legend.position = 'right') +
+  scale_x_continuous(limits = c(-9,6)) +
+  labs(title = "Self-regulation progress",
+       subtitle = "Average density plot in halved data",
+       #caption = "Figure 3.", 
+       x = "Self-regulation offset", y = "Time") +
+  NULL
+```
+
+## Individual level
+
+### Self-regulation per session
+
+```{r eval=F}
+session_summaries_id <- group_by(d, id, session) %>%
+  summarize(mean = mean(bold, na.rm = T),
+              se = sd(bold, na.rm = T)) #/ sqrt(n()))
+
+session_summaries_id %>%
+  ggplot(aes(x=session, y=mean)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-se, ymax=mean+se), size = .5) +
+  geom_ribbon(aes(ymin = mean-se, ymax = mean+se), alpha = .2) +
+  geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() + 
+  theme(aspect.ratio = 1, legend.position = 'right') +
+  labs(color='ID') +
+  facet_wrap(id~.) +
+  labs(title = "Self-regulation accross sessions",
+       subtitle = "Average + standard deviation per session per participant",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Mean self-regulation offset") +
+  NULL
+```
+
+### Self-regulation per level
+
+Plot inspiration from https://vuorre.netlify.com/post/2017/within-subject-scatter/
+
+```{r eval=F}
+subject_summaries <- group_by(d, id, level) %>%
+  summarize(mean = mean(bold, na.rm = T),
+            se = sd(bold, na.rm = T)) #/ sqrt(n()))
+means <- dplyr::select(subject_summaries, -se) %>%
+  spread(key=level, value=mean, sep = "_")
+ses <- dplyr::select(subject_summaries, -mean) %>%
+  spread(key=level, value=se, sep = "SE")
+sums <- left_join(means, ses)
+
+sums %>%
+  ggplot(aes(x=level_6, y=level_9, colour=factor(id))) +
+  #geom_abline(linetype="dashed") +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_vline(xintercept=0, linetype="dashed") +
+  geom_point() +
+  geom_errorbar(aes(ymin=level_9-levelSE9, ymax=level_9+levelSE9)) +
+  geom_errorbarh(aes(xmin=level_6-levelSE6, xmax=level_6+levelSE6)) +
+  scale_x_continuous(limits = c(-6,6)) +
+  scale_y_continuous(limits = c(-9,3)) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() + 
+  theme(aspect.ratio = 1, legend.position = 'right') +
+  labs(color='ID') +
+  labs(title = "Mean self-regulation for each level",
+       subtitle = "Mean + SD for each level",
+       #caption = "Figure 3.", 
+       x = "Level 6 offset", y = "Level 9 offset") +
+  NULL
+```
+
+
+
+
+
+=========
+# RATINGS
+
+
+### Self-rating per session
+
+
+For rating analysis, remove rows (trials) that contain a `NA` value (18 trials per participant), corresponding to control trials.
+
+```{r}
+df_ratings <- df %>% drop_na()
+```
+
+
++ **fb_prior** (num) : Variable representing the average of previous neurofeedback for each participant separately. The calculation can be changed so the prior reflects a running average, or the last 5 values, etc. It is calculate with the custom code chunk below.
+
+```{r}
+# Spread the FB in two different columns per level to calculate mean separately
+p <- spread(df_ratings, "target", fb_2_target)
+
+winl = 5  # window length
+for (index in 1:nrow(p)) { 
+  trialN <- df_ratings$trial[index] # Set this trial number
+  levelN <- df_ratings$cond[index] # Set this level
+  
+  if (trialN==1){
+    start <- index # Lock 1st trial for this participant
+    df_ratings$fb_prior[index] <- 0  # Set nothing for first 5 trials
+  }  
+  else if (trialN>1 & trialN<=winl){
+    df_ratings$fb_prior[index] <- 0  # Set nothing for first 5 trials
+  }
+  else if (trialN>winl){
+    # 1. Calculate mean of all trials for this participant
+    #df_ratings$fb_prior[index] <- mean(df_ratings$FB2TARGET[start:(index-1)]) 
+    # 2. Calculate mean of last X trials
+    # df_ratings$fb_prior[index] <- mean(df_ratings$FB2TARGET[(index-winl):(index-1)])  
+    # 3. Calculate mean of last X trials for each level separately
+    if (levelN == 1){
+      nr <- p$'6'[(start):(index-1)]
+      nr <- nr[!is.na(nr)]
+      prev_vals <- tail(nr,winl)  # Last X values, or less if not available
+    } 
+    else if (levelN == 2){
+      nr <- p$'9'[(start):(index-1)]
+      nr <- nr[!is.na(nr)]
+      prev_vals <- tail(nr, winl) # Last X values, or less if not available
+    }
+    df_ratings$fb_prior[index] <- mean(prev_vals, na.rm=TRUE)
+  }
+} 
+```
+
+** TO-DO ** : 
+- Do something with first X first trials  
+- Do a loop and try different window-lengths, and see which fits better the data
+
+
+## Group level
+
+### Scatterplots of all trials
+
+Visualise the variables of interest in four figures. The first goal is to ensure there is a linear relationship between the variables. We can also see if there are any apparent outliers.  
+
+```{r}
+
+# 1. 
+
+p1 <- df_ratings %>% 
+  ggplot(aes(x=trial, y=fb_2_target, color=as.factor(target))) +
+  geom_vline(xintercept = c(60, 120), linetype="dashed", size=.25) +
+  geom_jitter(size = .7, width = .15, height = .15, alpha = .1) +
+  stat_summary(aes(group=target), fun.y=mean, geom="line", size=.6) +
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  theme_linedraw() +
+  theme(legend.position = "none") + 
+  labs(title = "Trial-by-trial self-regulation",
+       #subtitle = "Lines represent the mean.",
+       #caption = "(Lines represent the mean)", 
+       x = "Trial", y = "Neurofeedback \n(Diff intended)")
+
+# 2. 
+
+p2 <- df_ratings %>% 
+  ggplot(aes(x=trial, y=fb_prior, colour=as.factor(target))) +
+  geom_vline(xintercept = c(60, 120), linetype="dashed", size=.25) +
+  geom_jitter(size = .7, width = .15, height = .15, alpha = .1) +
+  stat_summary(aes(group=target), fun.y=mean, geom="line", size=.6) +
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  theme_linedraw() +
+  theme(legend.position = "none") + 
+  labs(title = "Trial-by-trial running average (prior)",
+       #subtitle = "Lines represent the mean.",
+       #caption = "(Lines represent the mean)", 
+       x = "Trial", y = "History")
+
+# 3. 
+
+p3 <- df_ratings %>% 
+  ggplot(aes(x=fb_2_target, y=rating_2_target, color=as.factor(target))) +
+  geom_abline(linetype="dashed", size=.25) +
+  geom_jitter(size = .7, width = .2, height = .2, alpha = .1) +
+  geom_smooth(method='lm', color='black', size=.5) + 
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  theme_linedraw() +
+  theme(legend.position = "none") + 
+  labs(title = "Ratings by self-regulation",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 3.", 
+       x = "Neurofeedback (Diff intended)", y = "Rating")
+
+#4. 
+
+p4 <- df_ratings %>% 
+  ggplot(aes(x=fb_prior, y=rating_2_target, color=as.factor(target))) + 
+  geom_abline(linetype="dashed", size=.25) +
+  geom_jitter(size = .7, width = .2, height = .2, alpha = .1) +
+  geom_smooth(method='lm', color='black', size=.5) + 
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  theme_linedraw() +
+  theme(legend.position = "none") + 
+  labs(title = "Ratings by prior",
+       #subtitle = "A small subtitle here.",
+       #caption = "Figure 4.", 
+       x = "History", y = "Rating")
+
+# Patch plots together using 'patchwork' package
+# The custom color legend is applied on all four plots using '*'
+((p1 + p2) / (p3 + p4)) + plot_annotation(tag_levels = 'A') + plot_layout(ncol = 1)
+```
+
+* Fig A The self-regulation values (the BOLD *neurofeedback* from SMA) for each participant for every trial.
+* Fig B The calculated *prior* for each participant, i.e. the running average of previous SMA - BOLD - Neurofeedback values in each *target level* separately. It is calculated as the `average of the last 5 trials`, and this calculation might change to reflect a better `prior`.
+* Fig C Ratings by self-regulation
+* Fig D Ratings by prior
+
+
+```{r}
+session_summaries_error_by_target <- df_ratings %>%
+  group_by(target, session) %>%
+  summarize(mean = mean(rating_2_fb, na.rm = T),
+              se = sd(rating_2_fb, na.rm = T))# / sqrt(n()))
+
+e1 <- session_summaries_error_by_target %>%
+  ggplot(aes(x=session, y=mean, fill=as.factor(target))) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-se, ymax=mean+se), size = .5) +
+  geom_ribbon(aes(ymin = mean-se, ymax = mean+se), alpha = .2) +
+  geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  scale_y_continuous(limits = c(-6,6)) + 
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+   scale_fill_manual(labels=target.labels, values = target.colors, guide=FALSE) +
+  facet_grid(target~.) +
+  labs(title = "Rating error",
+       subtitle = "Average + sd per session",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Mean self-rating error") +
+  NULL
+
+session_summaries_error <- df_ratings %>%
+  group_by(session) %>%
+  summarize(mean = mean(rating_2_fb, na.rm = T),
+              se = sd(rating_2_fb, na.rm = T))# / sqrt(n()))
+
+e2 <- session_summaries_error %>%
+  ggplot(aes(x=session, y=mean)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-se, ymax=mean+se), size = .5) +
+  geom_ribbon(aes(ymin = mean-se, ymax = mean+se), alpha = .2) +
+  geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  scale_y_continuous(limits = c(-6,6)) + 
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+  labs(title = "Rating error with levels combined",
+       subtitle = "Average + sd in rating error per session",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Average rating error") +
+  NULL
+
+(e1 + e2) 
+```
+
+```{r}
+session_summaries_error_by_target <- df_ratings %>%
+  group_by(session) %>%
+  summarize(mean = mean(abs(rating_2_fb), na.rm = T),
+              sd = sd(rating_2_fb, na.rm = T),
+              n = n(),
+              se = sd / sqrt(n),
+              ci = se * 1.96)
+
+session_summaries_error_by_target %>%
+  ggplot(aes(x=session, y=mean), linetype=as.factor(target, shape=as.factor(target))) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-ci, ymax=mean+ci), position=position_dodge2(width=.15), size = .75) +
+  #geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci, fill=as.factor(target)), alpha = .2) +
+  geom_line() +
+  #geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  #scale_y_continuous(limits = c(0,6)) + 
+  theme_linedraw() + 
+  theme(aspect.ratio = 1) +
+  scale_fill_manual(labels=target.labels, values = target.colors, guide=FALSE) +
+  #facet_grid(target~.) +
+  labs(title = "Rating error",
+       #subtitle = "Average + sd per session",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Mean absolute self-rating error") +
+  NULL
+```
+
+
+
+### Average rating error per session
+
+TO-DO:  
+Should I use a.u. ? Average error units (as in Schurger 2017)
+
+
+
+```{r}
+
+session_error_id <- df_ratings %>%
+  group_by(id, session) %>%
+  summarize(mean = mean(abs(rating_2_fb), na.rm = T),
+              sd = sd(rating_2_fb, na.rm = T),
+              se = sd / sqrt(n()),
+              ci = se * 1.96)
+
+session_error_id %>%
+  ggplot(aes(x=session, y=mean)) +
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-se, ymax=mean+se), size = .5) +
+  geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci), alpha = .2) +
+  #geom_ribbon(aes(ymin = mean-se, ymax = mean+se), alpha = .35) +
+  #geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci), alpha = .25) +
+  #geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd), alpha = .15) +
+  geom_smooth(method = 'lm', formula = y ~ poly(x, 2), se = F) +
+  geom_line() +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_x_continuous(breaks = c(1,2,3)) +  # Session shouldn't be a continuous value
+  #scale_y_continuous(limits = c(0,6), breaks = seq(0,12, by= 3)) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_linedraw() + 
+  theme(aspect.ratio = 1, legend.position = 'right') +
+  facet_wrap(id~., ncol=4) +
+  labs(title = "Self-rating error accross sessions",
+       #subtitle = "Average + standard deviation in rating \nerror, per session, per participant",
+       #caption = "Figure 3.", 
+       x = "Session", y = "Average absolute rating error") +
+  NULL
+```
+
+
+All together
+
+```{r fig.height=1.5}
+
+group_and_id_ratings <- df_ratings %>%
+  group_by(id, session) %>%
+  summarize(avg = mean(abs(rating_2_fb), na.rm=T),
+            sd  = sd(abs(rating_2_fb), na.rm=T),
+            se  = sd / n(),
+            ci  = se * 1.96) %>%
+  group_by(session) %>%
+  mutate(group_avg = mean(avg),
+         group_sd  = mean(sd),
+         group_se  = mean(se),
+         group_ci  = mean(ci))
+
+  
+group_and_id_ratings %>%
+  ggplot(aes(x=as.factor(session), y=avg)) +
+    geom_hline(yintercept=0, linetype="dashed") +
+    geom_line(aes(group = id), alpha = .2, position = position_dodge2(width=.1)) +
+    geom_point(aes(group = id), alpha = .2, position = position_dodge2(width=.1)) +
+    #geom_pointrange(aes(ymin=group_avg-group_ci, ymax=group_avg+group_ci), size = .5) +
+    #stat_summary(fun.y=mean, geom="line") +
+    #geom_line(aes(y=group_avg)) + 
+    stat_summary(fun.data=mean_cl_boot, fun.args = list(conf.int=1), geom="pointrange", size = 1.) +
+    theme_linedraw() +
+    theme(aspect.ratio = 1) +
+    labs(title = "Self-rating error accross sessions",
+       x = "Session", y = "Average absolute rating error") +
+   NULL
+
+
+```
+
+
+
+```{r}
+df_ratings <- df_ratings %>%
+  mutate(round_prior = round(fb_prior)) %>%
+  mutate(rating_2_prior_abs = abs(rating_2_target - round_prior)) %>%
+  mutate(rating_2_fb_abs = abs(rating_2_fb))
+```
+
+
+```{r}
+
+df_ratings_barplot <- df_ratings %>%
+  gather(key = "diff_type", value="diff_value", c("rating_2_prior_abs", "rating_2_fb_abs"))
+
+group_and_id_ratings <- df_ratings_barplot %>%
+  group_by(id, session, diff_type) %>%
+  summarize(avg = mean(diff_value, na.rm=T),
+            sd  = sd(diff_value, na.rm=T),
+            n = n(),
+            se  = sd / sqrt(8),
+            ci  = se * 1.96) 
+
+labels <- c(`rating_2_prior_abs` = "Distance to prior",
+            `rating_2_fb_abs` = "Distance to\nreal position")
+
+df_ratings_barplot %>%
+  ggplot(aes(x=as.factor(session), y=diff_value, color=as.factor(session))) + 
+    #geom_jitter(alpha=.1, size = .2, width=.4, height=.1)  +
+    stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill='white', aes(color = as.factor(session))) +
+    stat_summary(fun.data=mean_cl_boot, fun.args = list(conf.int=1), geom="linerange", size = 1.25) +
+    geom_line(data=group_and_id_ratings, aes(y=avg, group = id), alpha = .25, color='black') +
+    #geom_point(data=group_and_id_ratings, aes(y=avg, group = id, shape=factor(id)), alpha = .75, color='black') +
+    geom_point(data=group_and_id_ratings, aes(y=avg, group = id), alpha = .25, color='black') +
+    facet_grid(.~diff_type, labeller = as_labeller(labels)) +
+    scale_color_OkabeIto() +
+  theme_minimal() +
+    theme(aspect.ratio = 2.5,
+          strip.text = element_text(size=10),
+          axis.text = element_text(size=14),
+          axis.title = element_text(size=14),
+          legend.position = 'left') +
+    scale_shape_manual(values=c(0,1,2,3,4,7,8,9)) +
+    labs(x = "Session", y = "Prediction of neurofeedback\n(average absolute difference)",
+         color = "Session", fill = "Session", shape='Participant') +
+    NULL
+```
+
+
+Add individual bars
+
+Ratings get closer to feedback because, 
+ratings are the intended target level,
+feedback gets closer to target level.
+
+Ratings get closer to prior because,
+priors (past performance) improves and gets closer to target level.we0r
+
+
+```{r}
+
+# RATINGS GROUP ANOVA
+
+# EXPORT RM ANOVA as summary 1 participants = 1 row
+df_ratings_group_summary <- df_ratings_barplot %>%
+  group_by(id, session, diff_type) %>%
+  summarise(mean(diff_value)) 
+
+#Reshape
+wide_ratings_group_summary <- dcast(df_ratings_group_summary, id ~ session + diff_type)
+
+# RATINGS GROUP ANOVA EXTENSION
+
+# DIFF OF LEARNING DIFF
+
+#Session 3 - Session 1 for each subj
+
+wide_ratings_group_summary_diffs <- wide_ratings_group_summary %>%
+  mutate(diff_fb = `3_rating_2_fb_abs` - `1_rating_2_fb_abs`,
+         diff_prior= `3_rating_2_prior_abs`  - `1_rating_2_prior_abs`) 
+
+write_csv(wide_ratings_group_summary_diffs, "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/jasp_analysis/wide_ratings_group_summary_diffs.csv")
+
+
+```
+
+
+
+Mini models
+
+Linear regression for each id
+
+
+```{r}
+
+thisID <- 11
+
+df_ratings_barplot %>%
+  filter(id==thisID) %>%
+  #group_by(id) %>%
+  #lm(rating_2_target ~ round_prior + fb_2_target + run + round_prior:run + fb_2_target:run, data = .) %>%
+  lm(rating_2_target ~ round_prior + fb_2_target + fb_2_target*session + round_prior:session  , data = .) %>%
+  #summarise(coeff_prior = lm(rating_2_target ~ round_prior + fb_2_target, data = .) %>%)
+  summary()
+
+  #summarise(coef=format(cor.test(rating_2_target, fb_2_target, alternative = "greater", method = "pearson")$estimate, digits = 3, nsmall = 3),
+  #          pval=format(cor.test(rating_2_target, fb_2_target, alternative = "greater", method = "pearson")$p.value, scientific=F, digits = 3, nsmall = 3),
+  #          cimin=cor.test(rating_2_target, fb_2_target, alternative = "greater", method = "pearson")$conf.int[1],
+  #          cimax=cor.test(rating_2_target, fb_2_target, alternative = "greater",  method = "pearson")$conf.int[2])
+
+df_ratings %>%
+  #filter(id==thisID) %>%
+  ggplot(aes(y=rating_2_target, x=fb_2_target)) +
+    geom_abline(linetype="dashed", size=.25) +
+    geom_jitter(size=.5) +  # width=0.1, height=0.1
+    geom_smooth(aes(y=rating_2_target), method='lm') + 
+    geom_smooth(aes(x=round_prior), method='lm', color='red', alpha=.5) + 
+    facet_wrap(.~id, ncol=4) +
+    theme_linedraw() +
+    scale_x_continuous(limits=c(-5,5)) +
+    scale_y_continuous(limits=c(-5,5)) +
+    NULL
+```
+
+
+# Model
+
+Schurger et al. (2017) used the simple linear model : `rating ~ prior + real`
+
+The `real` position was obtained from the output of classifier classifying EEG left-hand / righ-hand motor imagery. For us it would correspond to our averaged trial `bold` value (neurofeedback):
+
+`rating ~ prior + bold`
+
+Here I will use instead a mixed model using the lme4 package. Using a mixed model has the benefit of solving the problem of the non-independance of ratings in the data (multiple ratings are collected from each participant), which means we will be able to study how the coefficients of interest and the model intercepts vary between participants.
+
+As fixed effects, I will enter *prior*, *bold*, *run* and target *level* as fixed effects. I will also model the interaction between *time* (e.g. run) and *bold*, and *time* and *prior*. As random effects, I entered individual intercepts for each *subject*, as well as by-subject random slopes for *prior*, *bold*, *time*, and their interactions. 
+
+Note that we will start with the simplest model, and each parameter will only be included if the addition improves the model significantly (as indicated by an anova comparison).
+
+The explanation for the parameters:
+
+  * **Fixed** effects:
+    + fixed *prior* : effect of knowledge of prior performance on the *rating*
+    + fixed *bold* : effect of trial-specific sma-BOLD amplitude on the *rating*
+    + fixed *time* : effect of time (18 levels, could also go for 2 levels: early vs late)
+    + fixed *level* : trial condition (2 levels, 60% or 90% imagery intensity)
+  * Interaction terms:
+    + by-time *bold*: the effect of SMA-BOLD depends on time
+    + by-time *prior*: the effect of prior depends on time
+    + by-time *level*: the effect of level depends on time
+    + by-bold *prior*: the effect of prior depends on bold
+    + by-bold *level*: the effect of level depends on bold
+  * **Random** effects:
+    + random *subject* (subject_id) : baseline (intercept) rating can be different for each subject (personal bias)
+  * Random **slopes**:
+    + by-subject *bold* : the effect of *bold*  might be different for each participant (depending on their access)
+    + by-subject *prior* : the effect of prior on the *rating* might be different for each participant
+    + by-subject *time* : the effect of prior on the *rating* might be different for each participant
+  * Random slope **interactions** :
+    + Between the random slopes above.
+
+## Model fit comparison
+
+Important: When comparing models (e.g. with anova), I should add : `"REML=FALSE"` to the `lmer` formula. 
+
+I start with a simple model `rating ~ prior + (1|id)`, and add additional parameters whenever the addition improves the model fit significantly. Models are compared using ANOVA (after being fit *without* REML). REML can be used to compare random effects between models that have similar fixed effects. Do not set REML=TRUE if the fixed effects are different. 
+
+1. `rating ~ prior + (1|id)`
+2. `rating ~ prior + bold + (1|id)` **
+3. `rating ~ prior + bold + session + (1|id)`
+4. `rating ~ prior + bold + run + (1|id)` ***
+5. `rating ~ prior + bold + run + level + (1|id)` (Makes sense since `level` is "in" the" `prior`)
+6. `rating ~ prior + bold * run + (1|id)` **
+7. `rating ~ prior + bold * run + (1|id) + (0+ bold|id)` ***
+8. `rating ~ prior + bold * run + (1+bold|id)` [correlated intercept and slope] Not better than 7.
+9. `rating ~ prior + bold * run + (1+bold+run|id)` Does not converge [Use alternative methods]
+10. `rating ~ prior + bold * run + (1|id) + (0+bold+run|id)` Does not converge
+11. `rating ~ prior + bold * run + (1|id) + (0+ bold|id) + (0+run|id)` No better than 7.
+
+On convergeance, [this](https://stats.stackexchange.com/questions/242109/model-failed-to-converge-warning-in-lmer) StackExchange question.
+
+```{r eval=FALSE, include=TRUE}
+# Some examples
+mdl6 <- lmer(rating ~ fb_prior + fb_2_target * run + (1|id), data=df_ratings, REML=FALSE)
+#mdl7 <- lmer(rating ~ fb_prior + fb_2_target * run + (1|id) + (0+fb_2_target|id), data=df_ratings, REML=FALSE)
+mdl8 <- lmer(rating ~ fb_prior + fb_2_target * run + (1+fb_2_target|id), data=df_ratings, REML=FALSE)
+anova(mdl6, mdl7, mdl8)
+#summary(mdl7)
+```
+
+Model comparison without BOLD, with BOLD, with BOLD and interaction
+If multiple (>2) models, anova() figures out which model is smaller automatically. And then compares each model to the one in the previous row.
+
+```{r}
+mdl_without <- lmer(rating_2_target ~ fb_prior + run + (1|id), data=df_ratings, REML=F)
+mdl_with <- lmer(rating_2_target ~ fb_prior + fb_2_target + run + (1+fb_2_target|id), data=df_ratings, REML=F)
+mdl_with_interaction <- lmer(rating_2_target ~ fb_prior + fb_2_target * run + (1+fb_2_target|id), data=df_ratings, REML=F)
+#mdl_with_interaction2 <- lmer(rating_2_target ~ fb_prior + fb_2_target * run + (1+run*fb_2_target|id), data=df_ratings, REML=F) # SINGULAR
+mdl_with_more <- lmer(rating_2_target ~ fb_prior + fb_2_target + run + fb_prior:run + fb_2_target:run + (1 + fb_2_target | id), data=df_ratings, REML=F) #singular if fb_prior in random
+
+
+anova(mdl_without,mdl_with, mdl_with_interaction, mdl_with_more)
+#anova(mdl_without,mdl_with)
+#anova(mdl_with, mdl_with_interaction)
+```
+
+## Model summary
+
+Final model: 
+`rating ~ prior + bold * run + (1+bold|id)`
+
+REML is important when interested in the magnitude of the random effects. As such we set it as TRUE again.
+
+
+
+```{r}
+#mdl <- lmer(rating ~ prior + bold * run + (1+bold|id), data=d_clean, REML=TRUE)
+# Increase number of iterations is sometimes a way of solving non-convergeance
+mdl <- lmer(rating_2_target ~ round_prior + fb_2_target + session + round_prior:session + fb_2_target:session  + (1 +  fb_2_target | id), data=df_ratings, REML=TRUE,  control=lmerControl(optCtrl=list(maxfun=20000)))
+summary(mdl)
+```
+
+Predict ratings based on our model, and add them to our dataframe.
+
+```{r}
+#d$fit <- predict(mdl)
+#d_clean$fit <- predict(mdl)
+df_ratings_fit <- df_ratings %>% 
+  ungroup() %>%
+  mutate(fit = predict(mdl))
+```
+
+See the model coefficients. Note that main effects cannot be interpreted when the interaction is significant.
+
+```{r}
+fixef(mdl)
+#coef(mdl)
+ranef(mdl)
+```
+
+### Plot
+
+
+
+
+
+
+
+
+## Plot model coefficients
+
+### Individual slopes per session
+
+Fake lm slopes on the fitted values from the model, which is kind of the same as plotting the slopes?
+
+```{r}
+#d %>%
+df_ratings_fit %>%
+  #filter(id==5) %>%
+  ggplot(aes(x=fb_2_target, y=rating_2_target, colour=factor(id))) + 
+    geom_abline(linetype="dashed", size=.25) +
+    geom_hline(yintercept=0, linetype="dashed") +
+    geom_jitter(size = .8, width = .2, height = .2, alpha = .4) +
+    #stat_summary(fun.y=mean, geom="line", size=.6) +
+    geom_smooth(aes(y=fit), method = 'lm', se=FALSE, alpha = .5) + 
+    scale_y_continuous(name = "Rating", limits=c(-5,5), breaks=seq(-5,5,1))+
+    scale_x_continuous(name = "BOLD", limits=c(-5,5), breaks=seq(-5,5,1))+
+    scale_color_brewer(palette = "Dark2") +
+    facet_grid(. ~ session) +
+    #facet_grid(id ~ session) +
+    theme_bw() + 
+    theme(aspect.ratio = 1, legend.position = 'right') +
+    NULL
+```
+
+### Individual slopes per run
+
+To-Do:
+HELP:
+(1) - Value is : `main effect` multiplied by `random effect` multiplied by `interaction` and by `actual run value`?  [Add fixed effect]
+
+(2)
+Should Y in the model be rating error? not rating offset from target? your mind is too tired to think. Think tomorrow. Or that only for the confidence? Higher bold should correspond to higher offset. However, can I really interpret it this one? Since this is only one parameter, and there are others in the model, perhaps I should only focus on the absolute parameter weight.
+
+(3)
+Should I just look at the absolute *bold* value? Since the - or + effect on rating depends on where each participant starts (intercept). Some need to increase rating to improve, others to decrease.
+=> Depends on starting point (intercept). Negative slope is logic if intercept is positive, and vice-versa.
+
+```{r fig.width = 1.8, fig.height = 1.5, echo = FALSE}
+res <- coef(mdl)
+id_intercept <- res$id$'(Intercept)'
+id_run <- res$id$session
+id_bold <- res$id$fb_2_target
+id_interaction <- res$id$'fb_2_target:session'
+
+participants <- rownames(res$id)
+participantsN <- length(unique(participants))
+runs <- 1:18
+
+# Empty matrix
+table <- data.frame(matrix(NA, length(runs), participantsN))
+#table$SE <- NA
+for (indexN in 1:participantsN) {
+  for (runN in runs) { 
+    # Calculate slope without intercept
+    bold_slope <- id_bold[indexN] * id_interaction[indexN] * runN #* (id_interaction[indexN] * runN)
+    # With intercept
+    #bold_slope <- id_intercept[indexN] + (id_bold[indexN] * id_interaction[indexN] * runN) #* (id_interaction[indexN] * runN)
+    # Add to table
+    table[runN,indexN] <- bold_slope
+  }
+}
+
+# Rename columns with participant list
+colnames(table) <- c(participants)
+table$run <- runs  # Add run number
+
+# Gather in same column and add absolute value column
+slopes <- table %>% 
+  gather(key="id","value", c(1:participantsN)) %>% 
+  mutate(abs_value = abs(value))
+
+
+slopes %>%
+  ggplot(aes(x=run, y=abs_value, color=factor(as.numeric(id)))) + 
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_point(size=1.5) + 
+  scale_color_brewer(palette = "Dark2") +
+  theme_linedraw() +
+  labs(title = "Model coefficient for SMA BOLD",
+       subtitle = "Coefficient for real BOLD value",
+       #caption = "Figure 3.", 
+       x = "Run", y = "Absolute coefficient value",
+       color = 'ID') +
+  NULL
+```
+
+
+### Slopes with intercept
+
+
+```{r}
+slopes %>%
+  ggplot(aes(x=run, y=value, color=factor(as.numeric(id)))) + 
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_point(size=1.5) + 
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  labs(title = "Model coefficients",
+       subtitle = "Coefficient for real BOLD value",
+       #caption = "Figure 3.", 
+       x = "Run", y = "Absolute coefficient value") +
+  NULL
+
+
+```
+
+Coefficient calculation with sampling
+
+```{r eval=FALSE}
+
+# 1
+
+library(merTools)
+# https://m-clark.github.io/mixed-models-with-R/random_intercepts.html
+class(mdl) <- "lmerMod" # mean, median and sd of the random effect estimates
+
+#simulate values of the fixed effects from the posterior using the function arm::sim (with wrapper).
+fesim <- FEsim(mdl)
+plotFEsim(fesim) + 
+  theme_bw() + labs(title = "Coefficient Plot of Model", 
+                    x = "Median Effect Estimate", y = "Evaluation Rating")
+```
+
+
+```{r}
+# Pick an observation at random and then modify its values deliberately to see how the prediction changes in response.
+#sample <- draw(mdl, type = 'average')
+sample <- draw(mdl, type = 'random', seed=1)
+
+# The function wiggle allows us to create a new dataframe with copies of the variable that modify just one value. Here we modify Run x Bold, with 18 (run) x 16 (bold) (=288)  comb
+newData <- wiggle(sample, 
+                  varlist = c("run", "bold"), 
+                  valueslist = c(list(unique(d$run)), 
+                                 list(unique(d$bold))))
+# Model predictions (with interval)
+plotdf <- predictInterval(mdl, newdata = newData, stat = "median", n.sims = 1000)
+plotdf <- cbind(plotdf, newData)
+
+plotdf$time[plotdf$run<10] <- 'early' 
+plotdf$time[plotdf$run>9] <- 'late' 
+
+#Plot 
+ggplot(plotdf, aes(y = fit, x = bold, color = time, group = time)) + 
+  geom_point() + 
+  geom_smooth(aes(color = time), method = "lm") + 
+  theme_bw() +
+  labs(title = "Predicted ratings for different bold and run values",
+       y = "Predicted")
+
+
+#impSim <- REimpact(mdl, InstEval[7, ], groupFctr = "NUMTARGET", breaks = 5,
+                   #n.sims = 300, level = 0.9)
+```
+
+
+```{r}
+resim <- REsim(mdl)
+plotREsim(REsim(mdl)) +   theme_bw()
+
+
+#shinyMer(mdl, simData = InstEval[1:500, ]) # just try the first 100 rows of data
+
+# 2
+
+#library(boot)
+#nsim=200
+#b_par<-bootMer(x=mdl,FUN=fixef,nsim=nsim)
+# 1 intercept
+# 2 prior
+# 3 bold
+# 4 run
+# 5 bold:run
+#boot.ci(b_par,type="perc",index=5)
+#confint(mdl,parm=c(5:9),method="boot",nsim=nsim,boot.type="perc")
+```
+
+
+```{r eval=FALSE}
+# 3
+nsim = 200
+perc = .85
+nsamples = round(nrow(d) * perc)
+ncoef = 2
+participants <- rownames(res$id)
+participantsN <- length(unique(participants))
+sampledCoefs <- data.frame(matrix(NA, participantsN*ncoef, nsim))
+for (i in 1:nsim) {
+  # Sample data
+  sampledData <- sample_n(d, nsamples, replace = FALSE)
+  # Fit the model
+  thisMod <- lmer(rating ~ prior + bold * run + (1+bold|id), data=sampledData, REML=TRUE)
+  # Obtain coefficients
+  bold <- coef(thisMod)$id$bold 
+  boldrun <- coef(thisMod)$id$'bold:run'
+  # Add to table
+  sampledCoefs[1:6,i] <- bold
+  sampledCoefs[7:12,i] <- boldrun
+}
+# Add column names
+#rownames(sampledCoefs) <- rep(participants, ncoef)
+#colnames(sampledCoefs) <- c('bold','bold:run')
+
+# Add column with coef names
+labelsID <- rep(participants, ncoef)
+labelsCoef <- rep(c('bold','bold:run'),each=participantsN)
+sampledCoefs <- cbind(labelsID, sampledCoefs)
+sampledCoefs <- cbind(labelsCoef, sampledCoefs)
+system("say Loop finished!")
+
+# Gather in same column
+coefTidy <- sampledCoefs %>% 
+  gather(key="nsim", value="coef", -labelsCoef, -labelsID)
+
+# Summaries
+coefSummary <- coefTidy %>%
+  group_by(labelsID, labelsCoef) %>%
+  summarize(mean = mean(coef, na.rm = T), se = sd(coef, na.rm = T)) #/ sqrt(n()))
+
+
+coefSummary %>%
+  mutate(id = labelsID) %>%
+  ggplot(aes(x=labelsCoef, y=mean, color=id)) + 
+  geom_hline(yintercept=0, linetype="dashed") +
+  geom_pointrange(aes(ymin=mean-se, ymax=mean+se), size = .5, position=position_dodge(.05)) +
+  #geom_line(aes(y=mean+se),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se), linetype='dashed', size=.25) +#lower SE line
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  labs(title = "Model coefficients",
+       subtitle = "Coefficient for real BOLD value",
+       #caption = "Figure 3.", 
+       x = "Run", y = "Absolute coefficient value") +
+  NULL
+```
+
+
+### Assumptions check
+
+#### (1) Linearity and homoskedasticity 
+
+We plot the residuals from the model to see if linearity and homoskedasticity assumptions are filled.
+
+- **Linearity**: the pattern in the results should not be non-linear (e.g. a U-shape, curvy pattern, etc)
+- **Homoskedasticity**: "the residuals of your model need to roughly have a similar amount of deviation from your predicted values." 
+  
+```{r}
+plot(residuals(mdl))
+```
+
+#### (2) Collinearity
+
+Adapted VIF function from [here](https://github.com/aufrank/R-hacks/blob/master/mer-utils.R).
+
+A VIF factor of 1 indicates no collinearity. Larger VIF factors (>2) are problematic.
+
+```{r}
+vif.mer <- function (fit) {
+## adapted from rms::vif
+v <- vcov(fit)
+nam <- names(fixef(fit))
+## exclude intercepts
+ns <- sum(1 * (nam == "Intercept" | nam == "(Intercept)"))
+if (ns > 0) {
+v <- v[-(1:ns), -(1:ns), drop = FALSE]
+nam <- nam[-(1:ns)] }
+d <- diag(v)^0.5
+v <- diag(solve(v/(d %o% d)))
+names(v) <- nam 
+v }
+
+# Apply function to our model
+vif.mer(mdl)
+```
+
+#### (3) Normality of residuals
+
+The normality assumption is perhaps the less important one, according to WB's tutorial.
+The histogram should show a normal distribution (bell shape) around 0, and the QQ-plot should show points falling on the diagnonal. Check this [https://xiongge.shinyapps.io/QQplots/](ShinyApp) to better understand QQ-plots.
+
+```{r}
+hist(residuals(mdl))
+qqnorm(residuals(mdl))
+```
+
+#### (4) Influential points
+
+We use the influence.ME package. See their paper [here (PDF)](https://journal.r-project.org/archive/2012-2/RJournal_2012-2_Nieuwenhuis~et~al.pdf). 
+Influential points are not necessarily outliers, and vice-versa.
+
+> "As a rule of thumb, a cut-off value is given for DFBETAS (Belsley et al., 1980): 2/√n, in which n, the number of observations, refers to the number of groups in the grouping factor under evaluation (and not to the number of observations nested within the group under investigation). Values exceeding this cut-off value are regarded as overly influencing the regression outcomes for that specific estimate.""
+
++ **grouping parameter**: influence is compared by iteratively removing levels from the grouping parameter
+
+
+```{r eval = FALSE}
+library(influence.ME)
+
+influential <- influence(mdl, "id")  # Gr
+#rs_betas  <- dfbetas(influential)  # provides a value for each parameter
+res_cook <- cooks.distance(influential, sort=TRUE)
+
+```
+
+#### (5) Independence (Important!)
+
+Mixed model is used to take into account non-independence of values (per subject, per session, etc).
+
+
+
+
+
+------
+
+Individual modelling
+
+
+For each participant, fit several models.
+
+Prior: all, by_session, by_run (find best fit)
+prior_variance: 
+bold: 
+time: run, session, earlylate
+
+```{r}
+p6 <- d %>% filter(id==11)
+
+mdd <- lm(rating ~ prior + bold + session + bold:session + prior:session, data=p6)
+
+summary(mdd)
+
+
+#lm(rating ~ prior_full + prior_session + bold_avg + session + bold_avg:session + prior_session:session)
+
+
+```
+
+
+
+===================
+
+Confidence
+
+===================
+
+
+Confidence
+a Raw confidence for tertiales of performance
+b Confidence accuracy
+c Confidence after error
+
+
+a Raw confidence (`conf`)
+
+Create tertiales of performance (rating_2_fb_abs)
+
+```{r}
+df_ratings_quant <- df_ratings %>%
+  group_by(id, session) %>%
+  mutate(rating_quant = ntile(rating_2_fb_abs, 5)) %>% #%>% filter(rating_quant %in% c(1, n_divisions))
+  mutate(nf_quant = ntile(abs(fb_2_target), 4)) %>%
+  mutate(conf_quart = ntile(conf, 4)) %>%
+  mutate(rating_bin = factor(ntile(rating_2_fb_abs, 2)))
+```
+
+
+```{r}
+#Plot raw confidence
+df_ratings_quant %>%
+  ggplot(aes(y=conf, x=session)) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white", aes(color = as.factor(session))) +
+  stat_summary(fun.data=mean_cl_boot, fun.args = list(conf.int=1), geom="linerange", size = 1.25, aes(color=as.factor(session))) +
+  #stat_summary(fun.data=mean_sdl, geom="linerange", size = 1.25, aes(color=as.factor(session))) +
+
+  facet_wrap(.~id, ncol = 4) + 
+  scale_y_continuous(name="Confidence", 
+                     breaks = seq(0, 10, 2), 
+                     limits=c(0, 10), 
+                     labels=c("0" = "50%", "2" = "60%", "4" = "70%", "6" = "80%", "8" = "90%", "10" = "100%")) + 
+  labs(x = "Session", color = "Session") + 
+  theme_linedraw() +
+  theme(aspect.ratio = 1) +
+  NULL
+```
+
+
+```{r}
+#Plot raw confidence GROUP
+group_and_id_conf <- df_ratings_quant %>%
+    ungroup() %>%
+   mutate(session = factor(session, levels = c(1,2,3), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  group_by(id, session, rating_bin) %>%
+  summarize(avg = mean(conf, na.rm=T),
+            sd  = sd(conf, na.rm=T),
+            n = n(),
+            se  = sd / sqrt(8),
+            ci  = se * 1.96) 
+
+dodg_width <- 1
+
+df_ratings_quant %>%
+  ungroup() %>%
+  mutate(session = factor(session, levels = c(1,2,3), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  ggplot(aes(x=rating_bin, y=conf, color=as.factor(session))) + 
+    #geom_jitter(alpha=.1, size = .2, width=.4, height=.1)  +
+    stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill="white") +
+    stat_summary(fun.data=mean_cl_boot, fun.args = list(conf.int=1), geom="linerange", size = 1.25) +
+    geom_line(data=group_and_id_conf, aes(y=avg, group=interaction(id, session)), alpha = .25, color='black') +
+    #geom_point(data=group_and_id_conf, aes(y=avg, shape=factor(id)), alpha = .75, color='black') +
+    geom_point(data=group_and_id_conf, aes(y=avg), alpha = .25, color='black') +
+    theme_minimal() +
+    scale_color_OkabeIto() +
+    scale_shape_manual(values=c(0,1,2,3,4,7,8,9)) +
+    facet_grid(.~session) +
+    theme(aspect.ratio = 4, 
+          strip.text = element_text(size=10),
+          legend.position = 'none',
+          panel.spacing.x = unit(0, "null"),  # merge facet panels side-to-side
+          panel.border = element_blank(),
+          axis.text.y = element_text(size=11),
+          axis.title.y = element_text(size=14)) +  # remove border between facets
+    scale_y_continuous(name="Confidence", 
+                     breaks = seq(0, 10, 2), 
+                     limits=c(0, 10), 
+                     labels=c("0" = "50%", "2" = "60%", "4" = "70%", "6" = "80%", "8" = "90%", "10" = "100%")) + 
+    scale_x_discrete(labels = c('Better','Worse')) +
+    labs(x = "Rating Accuracy (Median split)",
+         color = "Session", shape = "Participant") +
+    NULL
+```
+
+```{r}
+# export data for RM ANOVA
+# export RM ANOVA as summary 1 participants = 1 row
+df_conf_group_summary <- df_ratings_quant %>%
+  group_by(id, session, rating_bin) %>%
+  summarise(mean(conf)) 
+
+#Reshape
+wide_conf_group_summary <- dcast(df_conf_group_summary, id ~ session + rating_bin)
+
+#write_csv(wide_conf_group_summary, "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/jasp_analysis/wide_conf_group_summary.csv")
+
+```
+
+
+
+
+Follow-up comparisons between sessions. Did raw confidence change between
+sesions? I don't care for now
+
+I am interested in CONFIDENCE ACCURACY, or relation between confidence and
+changes in error.
+
+I use modified variables of confidence and error:
+
+- Confidence reduced to a 1-4 scale for each participant (confidence values 
+grouped by participant and split in 4 quartiles).
+- Error reduced to quantiles 1-5 (also by participant).
+
+So all scales (confidence and error) have the same number of values for each
+value
+
+
+For each, compare confidence accuracy between sessions
+
+
+
+
+
+
+
+
+# Confidence - error simple regressions
+
+Group
+
+To-do:
+
+Mixed model. Center if no convergeance.
+Better dummy variables (for session effect interpretation)
+
+```{r fig.height=1.}
+
+df_ratings_quant %>%
+  #lm(conf_quant ~ rating_quant * as.factor(session), data = .) %>%  # WITH INTERACTION
+  #lmer(conf_quant ~ rating_2_fb_abs * as.factor(session) + (1|id), data = .) %>%  # WITHOUT INTERACTION
+  lmer(conf ~ rating_2_fb_abs + as.factor(session) + (1|id), data = .) %>%
+  #lmer(conf ~ rating_2_fb_abs + as.factor(session) + (1+rating_2_fb_abs+as.factor(session)|id), data = .) %>%
+  summary()
+
+
+df_ratings_quant %>%
+  ggplot(aes(y=conf, x=rating_2_fb_abs)) +
+    geom_jitter(aes(color=as.factor(session)), size=.5, width=0.25, height=0.25) +  # width=0.1, height=0.1
+    geom_smooth(aes(group=as.factor(session), color=as.factor(session)),  method='lm', se=F) + 
+    #geom_abline(linetype="dashed", size=.25) +  # add intercept from model for each session
+    #geom_abline(linetype="dashed", size=.25) +  # add intercept from model for each session
+    #geom_abline(linetype="dashed", size=.25) +  # add intercept from model for each session
+    #facet_wrap(.~id, ncol=4) +
+    theme_linedraw() +
+    #scale_x_continuous(limits=c(-5,5)) +
+    #scale_y_continuous(limits=c(1,4)) +
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    labs(color = "Session") +
+    NULL
+```
+
+Individuals
+
+```{r}
+
+thisID <- 11 
+
+# contrasts
+df_ratings_quant$session <- factor(ordered(df_ratings_quant$session))
+contrasts(df_ratings_quant$session) <- contr.poly(3)
+
+
+df_ratings_quant %>%
+  filter(id==thisID) %>%
+  mutate(conf = case_when(conf == 0 ~ 50, conf == 1 ~ 55, conf == 2 ~ 60, conf == 3 ~ 65, conf == 4 ~ 70, conf == 5 ~ 75, conf == 6 ~ 80, conf == 7 ~ 85, conf == 8 ~ 90, conf == 9 ~ 95, conf == 10 ~ 100)) %>%
+  #lm(conf ~ 1, data = .) %>%  # nothing : 2 
+  #lm(conf ~ factor(ordered(session)), data = .) %>%  # session only: 7,9
+  #lm(conf ~ rating_2_fb_abs + factor(ordered(session)), data = .) %>%  # NO INTERACTION : 2, 4, 6(i), 7, 8, 9 
+  lm(conf ~ rating_2_fb_abs * factor(ordered(session)), data = .) %>%  # WITH INTERACTION :  5 (2nd;i), 11 (3rd)
+  summary()
+
+# SUMMARY
+# Nothing
+#2,8
+
+# Only session effects
+#7
+#9
+
+# Main effects error
+#4 (neg)
+
+# INTERACTION
+#5 (2nd;i) (quadratic, neg neg)
+#6 (quadratic, pos pos)
+#11 (3rd) (linear and quadratic, neg neg)
+
+# To-do: Select only values of z for which regression p-value is < 0.05   
+#plt + geom_smooth(data=d[d$z %in% names(p.vals)[p.vals < 0.05],], aes(x, y, colour=z), method='lm')
+# OR: create new vaiable for smooth, removing non sig participants, or no interaction participants
+
+# draw ablines depending on model coeffs
+
+df_ratings_quant %>%
+  #filter(id==thisID) %>%
+  ggplot(aes(y=conf, x=rating_2_fb_abs)) +
+    #geom_abline(linetype="dashed", size=.25) +
+    geom_jitter(aes(color=as.factor(session)), size=.57, width=0.25, height=0.25) +  # width=0.1, height=0.1
+    geom_smooth(aes(y=conf, group=as.factor(session), color=as.factor(session)), method='lm', se=F) + 
+    facet_wrap(.~id, ncol=4) +
+    #facet_grid(session~id) +
+    theme_linedraw() + 
+    theme(aspect.ratio = 1) +
+    #scale_x_continuous(limits=c(-5,5)) +
+    #scale_y_continuous(limits=c(-5,5)) +
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_y_continuous(name="Confidence", 
+                       breaks = seq(0, 10, 2), 
+                       limits=c(0, 10), 
+                       labels=c("0" = "50%", "2" = "60%", "4" = "70%", "6" = "80%", "8" = "90%", "10" = "100%")) + 
+    scale_x_continuous(name="Self-rating error (Best = 0)", 
+                       breaks = seq(0, 12, 3), 
+                       limits=c(0, 12)) +
+    labs(color = "Session") +
+    NULL
+```
+
+# Ordinal Logistic Regression (Cumulative Link Models)
+
+These models allow to study an ordinal IV. For example, confidence labels
+from 1 to 4.
+
+Package `ordinal` and function `clm`. `clmm` or`clmm2` for the the mixed
+effects model variant.
+
+Problem I encountered: plot of predicted values looks cool, but there is no sig
+interaction in the model. I don't know how to interpret the model with enough
+confidence.
+Also, couldn't make `clmm` mixed model to converge and I used a normal `clm`
+for the group.
+
+```{r}
+
+# GROUP MODEL FOR CONFIDENCE
+
+#Prepare  a table with all factor combinations for the model prediction.
+table_for_pred <- expand.grid(conf_quant = c("1","2","3","4"), 
+                      session = c("1","2","3"), # ou scale(1:162)
+                      rating_2_fb_abs = sort(unique(df_ratings_quant$rating_2_fb_abs)))
+#table_for_pred <- table_for_pred %>%
+# Add session variable
+#  mutate(session = case_when(trial %in% c(1:60) ~ 1,
+#                             trial %in% c(61:120) ~ 2,
+#                             trial %in% c(121:180) ~ 3))
+
+df_ratings_quant %>%
+  clm(as.factor(conf_quant) ~ rating_2_fb_abs * as.factor(session), data = .) %>%
+  { fit_clm <<- .}
+
+
+# TRY MIXED-EFFECTS MODEL
+#fit_clmm <- clmm2(as.factor(conf_quant) ~ rating_2_fb_abs + as.factor(session) + rating_2_fb_abs:session, random=factor(id), data = df_ratings_quant, Hess = T)
+#fit_clmm <- clmm(as.factor(conf_quant) ~ as.factor(session) + (1|id), data = df_ratings_quant, Hess = T)
+
+# Show fit summary
+summary(fit_clm)
+
+# For the plot, let's add predicted values to the table 
+table_for_pred_fit <- table_for_pred
+table_for_pred_fit$fit_clm <- predict(fit_clm, newdata=table_for_pred, type="prob")$fit[,"1"]
+
+# Make plot
+table_for_pred_fit %>%
+  as.tibble(.) %>%
+  ggplot(aes(y=fit_clm, x=rating_2_fb_abs)) +
+    geom_jitter(aes(color=as.factor(conf_quant)), size=.5, width=0.25, height=0.25) +  # width=0.1, height=0.1
+    geom_smooth(aes(group=as.factor(conf_quant), color=as.factor(conf_quant)),  method='loess', se=F) + 
+    facet_wrap(.~session, ncol=4) +
+    theme_linedraw() +
+    scale_color_viridis(discrete=T) +
+    scale_x_continuous(name="Self-rating error (Best = 0)", breaks = seq(0, 12, 3), limits=c(0, 12)) +
+    labs(color = "Confidence",
+         y = "Probability") +
+    NULL
+```
+
+Show a plot for confidence probabilities in all trials
+
+```{r}
+
+# Create new table with all trials
+table_for_pred <- expand.grid(conf_quant = c("1","2","3","4"), 
+                      trial = 1:162,
+                      rating_2_fb_abs = sort(unique(df_ratings_quant$rating_2_fb_abs)))
+
+# Create new model with trial
+df_ratings_quant %>%
+  clm(as.factor(conf_quant) ~ rating_2_fb_abs * trial, data = .) %>%
+  { fit_clm <<- .}
+
+# Add values to table
+table_for_pred_fit <- table_for_pred
+table_for_pred_fit$fit_clm <- predict(fit_clm, newdata=table_for_pred, type="prob")$fit[,"1"]
+
+# Make plot of prediction table
+table_for_pred_fit %>%
+  as.tibble(.) %>%
+  ggplot(aes(y=fit_clm, x=trial)) +
+    #geom_jitter(aes(color=as.factor(conf_quant)), size=.5, width=0.25, height=0.25) +  # width=0.1, height=0.1
+    geom_smooth(aes(group=as.factor(conf_quant), color=as.factor(conf_quant)),  method='loess', se=F) + 
+    theme_linedraw() +
+    scale_color_viridis(discrete=T) +
+    labs(color = "Confidence") +
+    NULL
+```
+
+```{r}
+
+# INDIVIDUAL
+
+thisID <- 2
+
+df_ratings_quant %>%
+  filter(id==thisID) %>%
+  clm(as.factor(conf_quant) ~ scale(rating_2_fb_abs) * as.factor(session) , data = .) %>%
+  { clm_id <<- .} %>%
+  summary()
+
+table_for_pred <- expand.grid(conf_quant = c("1","2","3","4"), 
+                      session = c("1","2","3"), # ou scale(1:162)
+                      rating_2_fb_abs = sort(unique(df_ratings_quant$rating_2_fb_abs)))
+table_for_pred_fit <- table_for_pred
+table_for_pred_fit$fit_clm <- predict(clm_id, newdata=table_for_pred, type="prob")$fit[,"1"]
+
+table_for_pred_fit %>%
+  as.tibble(.) %>%
+  ggplot(aes(y=fit_clm, x=rating_2_fb_abs)) +
+    #geom_abline(linetype="dashed", size=.25) +
+    geom_jitter(aes(color=as.factor(conf_quant)), size=.5, width=0.25, height=0.25) +  # width=0.1, height=0.1
+    geom_smooth(aes(group=as.factor(conf_quant), color=as.factor(conf_quant)),  method='loess', se=T) + 
+    facet_wrap(.~session, ncol=4) +
+    theme_linedraw() +
+    #scale_x_continuous(limits=c(-5,5)) +
+    #scale_y_continuous(limits=c(-5,5)) +
+    #scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_color_viridis(discrete=T) +
+    #scale_y_continuous(name="Confidence", breaks = seq(1, 4, 1), limits=c(1,4)) + 
+    #scale_x_continuous(name="Self-rating error (Best = 0)", breaks = seq(0, 12, 3), limits=c(0, 12)) +
+    labs(color = "Confidence",
+         x = "Rating error") +
+    NULL
+```
+
+### 
+
+
+
+
+
+Creating confidence quartiles might be better for slopes? But it seems to
+remove intercept / confidence bias per session (obviously). Not sure if I 
+should use it, probably
+
+
+
+# Calculate variability index as sd of prior
+
+
+
+
+
+
+
+
+
+Split most and least confident, see accuracy
+
+```{r}
+# Create quantiles
+
+n_divisions<- 2
+df_ratings_quant_2 <- df_ratings %>%
+  group_by(id, session) %>%
+  mutate(conf_quant = ntile(conf, n_divisions))
+
+#Plot confidence
+df_ratings_quant_2 %>%
+  ggplot(aes(y=rating_2_fb_abs, x=factor(conf_quant))) + 
+  stat_summary(geom = "bar", fun.y = mean, alpha = 1, width=.75, size = 1.25, fill=NA, aes(color = as.factor(session))) +
+  stat_summary(fun.data=mean_cl_boot, fun.args = list(conf.int=1), geom="linerange", size = 1.25, aes(color=as.factor(session))) +
+  #stat_summary(fun.data=mean_sdl, geom="linerange", size = 1.25, aes(color=as.factor(session))) +
+
+  #facet_grid(session~.) + 
+  #scale_y_continuous(limits = c(0,12), breaks = seq(0,12,by=3)) + 
+  labs(x = "Confidence", y = "Rating error") + 
+  NULL
+```
+
+
+b Confidence accuracy
+
+Meta d', ROC
+
+
+```{r}
+
+```
+
+
+c Confidence variability
+
+How confidence affected by previous feedback. Which parameters?
+
+
+c Confidence based on previous trial
+
+

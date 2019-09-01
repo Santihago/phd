@@ -1,0 +1,1323 @@
+---
+title: "R Notebook ALR"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library('tidyverse')
+library('lmerTest')
+library('colorblindr')  # for colorblind proof color scales
+library('tidylog')
+```
+
+
+# Load data
+
+```{r importing data}
+
+#------- ECG DATA
+# load all 80 x 13 tables that are obtained from Matlab's R peak detection script
+
+# folder containing individual datasets 
+ecg_path <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/ALR/analysis/preprocessed/good_mix"
+
+# select specific files inside folder
+files = dir(path=ecg_path, patter='ecg_IBI_P')
+
+# read each selected file and combine into a unique dataframe
+ecg_data <- files %>%
+  # read in all the files, appending the path before the filename
+  map(~ read_csv(file.path(ecg_path, .),  # the function read_csv() from the readr package
+                 col_names = c("id", "trial", "trigger", "-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7"), 
+                 col_types = cols("i", "i", "i", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d"), 
+                 na = c("NaN"))) %>%
+  reduce(rbind)        # reduce with rbind into one dataframe
+
+#------- PSYCHOPY DATA
+# load all 80 x () tables from PsychoPy containing the trial information for each participant
+
+# folder containing individual datasets 
+psypy_path <- '/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/ALR/data/behavData/'
+
+# select specific files inside folder
+psypy_files = dir(path=psypy_path, patter='_2019_')
+
+# read each selected file and combine into a unique dataframe
+psypy_data <- psypy_files %>%
+  # using cols_only() to select only a subset of columns from the CSV file
+  map(~ read_csv(file.path(psypy_path, .), 
+                 col_types = cols_only(instructions = "c", screen = "i", date = "c", expName = "c", faceOrder = "c", sex = "c", list = "c", age = "i", triggers = "c", participant = "i", TrialNumber = "i", originCS = "c", US = "c"))) %>%
+  reduce(rbind) %>%    # reduce with rbind into one dataframe
+  transmute(           # keep only some columns, and change some column names
+    id = participant,
+    group = instructions,
+    face_order = faceOrder,
+    list = list,
+    trial = TrialNumber,
+    origin_cs = originCS,
+    us = US,
+    age = age,
+    gender = sex)
+
+# Merge together the two datasets, to have the trial information together with the ECG data for each participant.
+# using dplyr::inner_join(), it only retains rows that match between the two datasets
+data_wide <- inner_join(psypy_data, ecg_data,  by = c("id", "trial"))
+
+
+
+# Exclusions
+#excluded_ecg <- 
+excluded_gen <- c(21, 65)
+excluded_eeg <- c(6,15,25,40,54,60,67)
+
+
+```
+
+# Data wrangling
+
+
+## Gather heartbeats to one column
+
+Take the IBI columns and gather them under one single column (to have everything in "long" format)
+
+```{r}
+# tidyr::gather()
+df <- data_wide %>%
+  gather(key = "ibi_pos", value = "ibi_value", c("-2":"7"), na.rm = FALSE)
+
+# correct the order in the discrete X axis (re-order IBIPos variable)
+ibi_order <- c("-2","-1","0","1","2","3","4","5","6","7")
+df$ibi_pos <- factor(df$ibi_pos, levels = ibi_order)
+df <- df %>% arrange(id, trial, ibi_pos)
+```
+
+## Add new variables
+
+For the **instructed+**, a new run is defined at the instructions screen.
+For the **instructed-**, a new run starts when the new reinforcer appears (and
+is thus different depending on the trial list (A or B))
+
+* *instr_block* and *reinf_block*: I create 2 variables for both groups. 
+`instr_block` is the block number basedon instructions (0-20, 21-40, 41-60, 61-80), 
+and `reinf_block` is the number based on reinforcement history alone. In both the 
+blocks are coded numerically from 1 to 4.
+
+* *Reversed*: Similarly to run number, I add a variable indicating if the original contingency
+is reversed (`1`) or not (`0`). I do this based on the block/run number
+that I defined above for each group.
+
+```{r new variables}
+df <- df %>%
+  mutate(instr_block = case_when(trial < 21 ~ 1,
+                                (trial > 20 & trial < 41) ~ 2,
+                                (trial > 40 & trial < 61) ~ 3,
+                                (trial > 60 & trial < 81) ~ 4)) %>%
+  mutate(reinf_block = case_when((list=="trialListA" & trial < 28) ~ 1,
+                                (list=="trialListA" & trial > 27 & trial < 47) ~ 2,
+                                (list=="trialListA" & trial > 46 & trial < 68) ~ 3,
+                                (list=="trialListA" & trial > 67 & trial < 81) ~ 4,
+                                (list=="trialListB" & trial < 29) ~ 1,
+                                (list=="trialListB" & trial > 28 & trial < 46) ~ 2,
+                                (list=="trialListB" & trial > 45 & trial < 67) ~ 3,
+                                (list=="trialListB" & trial > 66 & trial < 81) ~ 4)) %>%
+  mutate(reversed_instr = case_when(
+                              (instr_block==1) ~ 0,
+                              (instr_block==2) ~ 1,
+                              (instr_block==3) ~ 0,
+                              (instr_block==4) ~ 1)) %>%
+  mutate(reversed_reinf = case_when(
+                              (reinf_block==1) ~ 0,
+                              (reinf_block==2) ~ 1,
+                              (reinf_block==3) ~ 0,
+                              (reinf_block==4) ~ 1)) %>%
+  mutate(reversed = case_when((group=="instructed-" & reinf_block==1) ~ 0,
+                              (group=="instructed-" & reinf_block==2) ~ 1,
+                              (group=="instructed-" & reinf_block==3) ~ 0,
+                              (group=="instructed-" & reinf_block==4) ~ 1,
+                              (group=="instructed+" & instr_block==1) ~ 0,
+                              (group=="instructed+" & instr_block==2) ~ 1,
+                              (group=="instructed+" & instr_block==3) ~ 0,
+                              (group=="instructed+" & instr_block==4) ~ 1))
+```
+
+
+## Remove outlier IBIs
+
+Not clear to me what the best way to remove IBI outliers is. The script to find
+R-peaks seemed pretty robust, but there are a few cases where I spotted a double
+IBI interval (due to a missed peak).
+
+Kemper, Hamilton & Atkinson 2007 discuss different methods to remove outliers
+and conclude that all of them produce similar results in common HRV measures.
+I am not measuring HRV here, but I took as example their cutoff threshold
+below and above 5 Standard Deviations.
+
+I will calculate that threshold for each participant so we can remove outliers.
+
+```{r, eval = FALSE}
+# Calculate mean IBI, SD, and lowe/higher 5 Standard Deviation bounds
+# Kemper, Hamilton, Atkinson 2007 compares different method
+df %>%
+  group_by(id) %>%
+  summarise(mean = mean(ibi_value),
+            BPM = 60/mean,
+            median = median(ibi_value),
+            diff = mean-median,
+            sd = sd(ibi_value), 
+            l_limit = mean-(5*sd),
+            h_limit = mean+(5*sd)) # %>% tail()
+```
+
+Use the `replace()` function to replace outlier values with `NA`.
+
+`replace(var, var<0, NA)`
+
+Also: go to actual ECG files and manually correct for these possible ECG R-peak misdetections.
+
+```{r}
+df <- df %>%
+  group_by(id) %>%
+  # Replace values that are below or above 5 SDs with NA
+  mutate(ibi_clean = replace(ibi_value, (ibi_value<((mean(ibi_value)-(5*sd(ibi_value))))|(ibi_value>(mean(ibi_value)+(5*sd(ibi_value))))), NA)) %>%
+  mutate(BPM=60/ibi_clean)
+#filter(is.na(ibi_clean)) # to output removed trials to console
+```
+
+
+### Create new variables
+
+Also add a reversed HR for decelerators?
+
+```{r mutate}
+df <- df %>%
+  group_by(id, trial) %>%
+  mutate(bl = mean(c(ibi_clean[ibi_pos=="-2"], ibi_clean[ibi_pos=="-1"]))) %>%  # Baseline
+  mutate(rel_ibi = (ibi_clean - bl) * 1000) %>%  # Multiplied to convert to ms 
+  
+  # PEAK DECELERATION
+  mutate(max_decel = max(c(rel_ibi[ibi_pos=="0"], rel_ibi[ibi_pos=="1"], rel_ibi[ibi_pos=="2"]))) %>%
+  #mutate(max_abs = max(c(abs(rel_ibi[ibi_pos=="0"]), abs(rel_ibi[ibi_pos=="1"]), abs(rel_ibi[ibi_pos=="2"])))) %>%
+  mutate(hr=max_decel) %>%
+  ungroup()
+```
+
+## Define cardiac response groups and learners
+
+Divide participants between accelerators and decelerators.
+We calculate the difference between CS+ and CS- trials in the first block.
+If deceleration CS+  > CS- : decelerators
+If deceleration CS+  < CS- : accelerators
+
+We can also extract the difference score to indicate magnitude of "learning" in the initial block.
+
+
+```{r eval=T}
+id_first_block_categorisation <- df %>%
+  filter(instr_block == 1) %>%
+  group_by(id, origin_cs) %>%
+  summarize(val = mean(hr, na.rm = T), sd = sd(hr, na.rm = T), group=first(group)) %>%
+  #summarize(val = mean(hr, na.rm = T), sd = sd(hr, na.rm = T)) %>%
+  mutate(first_diff = val[origin_cs=="CS+"] - val[origin_cs=="CS-"]) %>%
+  mutate(cardiac_dir = case_when(first_diff>0 ~ 'decelerator',
+                                 first_diff<0 ~ 'accelerator')) %>%
+  #select(id, cardiac_dir, first_diff, group) %>%
+  #select(id, cardiac_dir, first_diff) %>%
+  distinct(id, .keep_all= TRUE) # Remove repeated rows
+
+# Merge with df dataset
+df <- inner_join(df, id_first_block_categorisation, by="id")
+
+```
+
+
+Plot them as a function of first_diff
+
+```{r}
+id_first_block_categorisation %>%
+  #filter(!(id %in% excluded_eeg)) %>% # excluded
+  #filter(!(id %in% excluded_gen))  %>%# excluded
+  #filter(abs(first_diff)>5)  %>%# excluded
+  ggplot(aes(y=first_diff, x = reorder(factor(id), -first_diff))) +
+    geom_hline(yintercept=0, linetype="dashed") +
+    geom_hline(yintercept=5, linetype="solid", color='red', size= 0.25, alpha=.75) +
+    geom_hline(yintercept=-5, linetype="solid", color='red', size= 0.25, alpha=.75) +
+    #geom_rect(aes(xmin=-Inf, xmax=Inf, ymin=-5, ymax=5)) +
+    geom_point(aes(color=factor(cardiac_dir), shape=factor(group)), size= 1.75) + 
+    #theme_classic() + 
+  scale_color_brewer(palette="Dark2") +
+  theme_minimal() +
+  theme(text = element_text(size=15),
+        axis.text.x = element_blank(),
+        aspect.ratio = .25,
+        legend.direction = "horizontal",
+        legend.title = element_text( size = 8),
+        legend.text = element_text( size = 10),
+        legend.position = c(.72,.75)) +  #c(.6,.75)
+  labs(y = "Deceleration \nCS+ vs. CS– (ms)", x = "Participant",
+       #title = "RR interval difference (CS+ vs CS- ; 0 → CS-)"
+       shape = "Group", color = "Cardiac Response Pattern")
+
+```
+
+
+
+
+
+
+
+
+
+### Check how many in each group (frequency table)
+
+```{r}
+df %>%
+    filter(!(id %in% c(excluded_gen, excluded_eeg))) %>%
+    group_by(group.x, cardiac_dir) %>% 
+    summarise(n=n()/800)# %>%
+```
+
+
+### Try revertign responses in one group
+
+```{r}
+df <- df %>%
+  mutate(hr_combined = case_when((cardiac_dir=="accelerator") ~ hr*-1,
+                        TRUE ~ hr)) 
+```
+
+
+Invert conditions in one group for analysis
+(Create one codnitioned called: "Decelerating Stimulus")
+
+In decelerator, CS+ becomes CS-
+
+```{r}
+df <- df %>%
+  mutate(decel_stim = case_when((cardiac_dir=="decelerator" & origin_cs=='CS+') ~ 'Decelerative Stimulus',
+                                (cardiac_dir=="decelerator" & origin_cs=='CS-') ~ 'Accelerative Stimulus',
+                                (cardiac_dir=="accelerator" & origin_cs=='CS+') ~ 'Accelerative Stimulus',
+                                (cardiac_dir=="accelerator" & origin_cs=='CS-') ~ 'Decelerative Stimulus'))
+```
+
+Obtain a dataframe with one value per trial and remove NAs.
+
+```{r}
+df_trial <- df %>%
+  filter(abs(first_diff)>5) %>%
+  filter(!(id %in% excluded_gen)) %>% # excluded
+  filter(!(id %in% excluded_eeg)) %>% # excluded
+  group_by(id, group, list, cardiac_dir, trial, origin_cs, decel_stim, instr_block, reinf_block, reversed, us) %>%
+  summarise(hr=first(hr)) %>% # Keeps only one value per trial
+  drop_na() %>%
+  ungroup()
+```
+
+
+## Analyses
+
+### Simple descriptives
+
+```{r}
+df %>%
+  group_by(id) %>%
+  summarise(age = first(age), gender=first(gender)) %>%
+  filter(age>17) %>%
+  mutate(age_avg = mean(age),
+         age_sd = sd(age),
+         min_age = min(age),
+         max_age = max(age)) %>%
+  #filter(gender=="female") %>% count()
+  View()
+```
+
+
+
+### Summaries of cardiac response per block per group
+
+Calculate difference score for each block.
+
+```{r}
+# Get per block, diff score
+id_summary <- df %>%
+  #drop_na() %>%
+  filter(abs(first_diff)>5) %>%
+  filter(!(id %in% excluded_gen)) %>% # excluded
+  filter(!(id %in% excluded_eeg)) %>% # excluded
+  group_by(id, group, cardiac_dir, instr_block, reversed_instr, origin_cs) %>%
+  summarize(val = mean(hr, na.rm = T), sd = sd(hr, na.rm = T)) %>%
+  mutate(diff = case_when((cardiac_dir=="accelerator") ~ (val[origin_cs=="CS+"] - val[origin_cs=="CS-"]),
+                        TRUE ~ (val[origin_cs=="CS+"] - val[origin_cs=="CS-"]))) %>%  #else
+  mutate(diff_combined = case_when((cardiac_dir=="accelerator") ~ (val[origin_cs=="CS+"] - val[origin_cs=="CS-"])*-1,
+                        TRUE ~ (val[origin_cs=="CS+"] - val[origin_cs=="CS-"]))) %>%
+  group_by(cardiac_dir, instr_block, group, origin_cs) %>% 
+  mutate(group_val = mean(val))
+
+
+id_summary_diff <- id_summary %>%  #else
+  group_by(id, group, cardiac_dir, instr_block, reversed_instr) %>%
+  summarise(diff = first(diff),
+            diff_combined = first(diff_combined) ) %>%
+  ungroup()
+```
+
+### Plots of summaries
+
+Plot both stimuli
+
+```{r}
+
+dodge_width = .4
+pd <- position_dodge(width=dodge_width)
+
+  # Plot
+id_summary %>%
+  ggplot(aes(y=val, x = instr_block, color=origin_cs, group=interaction(origin_cs, group)), color=origin_cs) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    geom_violin(aes(group=interaction(factor(instr_block), origin_cs), fill=origin_cs, color=NA),  position=pd, alpha=.4) +
+    geom_jitter(alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    geom_point(aes(y=group_val), size = 3., position=pd, shape=21, color='white') +
+    geom_line(aes(y=group_val, group=interaction(origin_cs, group), linetype=origin_cs), size=1., position=pd) +
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, origin_cs)), alpha=.25) +
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    facet_grid(group~cardiac_dir) +
+    theme(aspect.ratio = .4, legend.position="bottom", panel.spacing = unit(1.5, "lines")) +
+   scale_y_continuous(limits=c(-10,100)) +
+   labs(title = "Cardiac deceleration for CS+ and CS- reflects changes in US expectancy",
+       #subtitle = "A higher value indicates an increase in the RR interval (higher deceleration)",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Peak RR Interval change (ms)", 
+       color = 'Original Stimulus', fill = 'Original Stimulus', linetype='Original Stimulus') +
+    NULL
+```
+
+```{r}
+
+dodge_width = .2
+pd <- position_dodge(width=dodge_width)
+
+  # Plot
+id_summary %>%
+  ggplot(aes(y=val, x = instr_block, color=origin_cs, group=interaction(origin_cs, group)), color=origin_cs) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(group=interaction(factor(instr_block), origin_cs), fill=origin_cs, color=NA),  position=pd, alpha=.4) +
+    #geom_jitter(alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    #geom_point(aes(y=group_val), size = 3., position=pd, shape=21, color='white') +
+    #geom_line(aes(y=group_val, group=interaction(origin_cs, group), linetype=origin_cs), size=1., position=pd) +
+   stat_summary(fun.data = mean_cl_boot, geom = 'line', position=pd, aes(linetype=origin_cs)) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .6, position=pd) +  # mean and SE
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, origin_cs)), alpha=.25) +
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    facet_grid(factor(group, levels=c("instructed+", "instructed-"), labels=c('Instructed', 'Uninstructed'))~cardiac_dir) +
+    theme(aspect.ratio = 1, legend.position="bottom", panel.spacing = unit(1, "lines")) +
+   #scale_y_continuous(limits=c(-10,100)) +
+   labs(
+       #title = "Cardiac deceleration for CS+ and CS- reflects changes in US expectancy",
+       #subtitle = "A higher value indicates an increase in the RR interval (higher deceleration)",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Deceleration (ms)", 
+       color = 'Original Stimulus', fill = 'Original Stimulus', linetype='Original Stimulus') +
+    NULL
+```
+
+
+Same plot but with inverted responses
+
+```{r}
+# Get per block, diff score
+id_summary_collapsed <- df %>%
+  group_by(id, group, instr_block, decel_stim) %>%
+  summarize(val = mean(hr, na.rm = T), sd = sd(hr, na.rm = T), se  = sd(hr, na.rm = T)/n(), ci  = 1.96*se) %>%
+  #mutate(diff = case_when((cardiac_dir=="accelerator") ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]),
+                        #TRUE ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]))) %>%  #else
+  #mutate(diff_combined = case_when((cardiac_dir=="accelerator") ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"])*-1,
+                       # TRUE ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]))) %>%
+  group_by(decel_stim, group, instr_block) %>%
+  mutate(group_val = mean(val), group_se = mean(se), group_ci = mean(ci))
+
+
+#id_summary_diff <- id_summary_collapsed %>%  #else
+#  group_by(id, group,  reversed) %>%
+#  summarise(diff = first(diff),
+#            diff_combined = first(diff_combined) ) %>%
+#  ungroup()
+```
+
+
+
+```{r fig.height=2}
+
+dodge_width = .4
+pd <- position_dodge(width=dodge_width)
+
+  # Plot
+id_summary_collapsed %>%
+  ggplot(aes(y=val, x = factor(instr_block), color=decel_stim, group=interaction(decel_stim, factor(instr_block)))) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    geom_violin(aes(fill=decel_stim, color=NA),  position=pd, alpha=.4, width=.7) +
+    geom_jitter(alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    geom_point(aes(y=group_val), size = 4., position=pd, shape=21, color='white') +
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, decel_stim)), alpha=.15, position=pd) +
+    geom_line(aes(y=group_val, group=interaction(decel_stim, group), linetype=decel_stim), size=1., position=pd) +
+    #stat_summary(fun.data = mean_cl_boot, geom = 'line') +  # this will create lines between the x factor levels
+    #stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .6) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    facet_grid(group~.) +
+    theme(aspect.ratio = .25, legend.position="bottom", panel.spacing = unit(1.5, "lines")) +
+    scale_y_continuous(limits=c(-10,100)) +
+   labs(title = "Modulation of cardiac responses by contingency reversals",
+       #subtitle = "",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Heart Rate Change (ms)", 
+       color = 'Conditioned Response', fill = 'Conditioned Response', linetype = 'Conditioned Response') +
+    NULL
+```
+
+```{r }
+
+dodge_width = .2
+pd <- position_dodge(width=dodge_width)
+
+  # Plot
+id_summary_collapsed %>%
+  ggplot(aes(y=val, x = factor(instr_block), color=decel_stim, group=decel_stim)) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(fill=decel_stim, color=NA),  position=pd, alpha=.4, width=.7) +
+    #geom_jitter(alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    geom_point(aes(y=group_val), size = 4., position=pd, shape=21, color='white') +
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, decel_stim)), alpha=.15, position=pd) +
+    #geom_line(aes(y=group_val, group=interaction(decel_stim, group), linetype=decel_stim), size=1., position=pd) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', position=pd, aes(linetype=decel_stim)) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .6, position=pd) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    facet_grid(factor(group, levels=c("instructed+", "instructed-"), labels=c('Instructed', 'Uninstructed'))~.) +
+    theme(aspect.ratio = 1, legend.position="bottom", panel.spacing = unit(1, "lines")) +
+    #scale_y_continuous(limits=c(-10,100)) +
+   labs(
+       #title = "Modulation of cardiac responses by contingency reversals",
+       #subtitle = "",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Deceleration (ms)", 
+       color = ' ', fill = ' ', linetype = ' ') +
+    NULL
+```
+
+
+
+```{r fig.height=2.5}
+
+  # Plot
+id_summary_collapsed %>%
+  ggplot(aes(y=val, x = factor(instr_block), color=factor(decel_stim))) + 
+    geom_line(aes(group=interaction(id, decel_stim)), alpha=.2) +
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_ribbon(aes(ymin = group_val-group_se, ymax = group_val+group_se, fill=decel_stim, color=decel_stim), alpha = 1.) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .5) +  # this will create lines between the x factor levels
+    #geom_linerange(aes(ymin = group_val-group_ci, ymax = group_val+group_ci, color=decel_stim), alpha = 1.) +
+    #geom_point(aes(y=group_val), size = 2) +
+    geom_line(aes(y=group_val, group=interaction(decel_stim, group), linetype=decel_stim), size=1.) +
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    facet_grid(group~.) +
+    theme(aspect.ratio = .6, legend.position="bottom", panel.spacing = unit(1.5, "lines")) +
+    #scale_y_continuous(limits=c(-10,100)) +
+   labs(title = "Modulation of cardiac responses by contingency reversals",
+       #subtitle = "",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Heart Rate Change (ms)", 
+       color = 'Conditioned Response', fill = 'Conditioned Response', linetype = 'Conditioned Response') +
+    NULL
+```
+
+
+
+```{r}
+df_trial_instructed <- df_trial %>% filter(group=="instructed+") 
+
+df_trial_instructed %>%
+  lmer(hr ~ origin_cs  * reversed + instr_block + (1 | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit1 }
+summary(mm_fit1)
+
+df_trial_instructed %>%
+  lmer(hr ~ decel_stim  * reversed + instr_block + (1 | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit2 }
+summary(mm_fit2)
+
+anova(mm_fit1, mm_fit2)
+```
+
+```{r}
+df_trial_uninstructed <- df_trial %>% filter(group=="instructed-")
+
+df_trial_uninstructed %>%
+  filter(group=="instructed-") %>%
+  lmer(hr ~ origin_cs  * reversed + instr_block + (1 | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit3 }
+summary(mm_fit3)
+
+df_trial_uninstructed %>%
+  filter(group=="instructed-") %>%
+  lmer(hr ~ decel_stim  * reversed + instr_block +(1 | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit4 }
+summary(mm_fit4)
+
+anova(mm_fit3, mm_fit4)
+
+```
+
+
+#### Plot model prediction
+
+```{r}
+df_trial_instructed_pred <- df_trial_instructed %>%
+    #drop_na() %>%
+    mutate(model_pred_1 = predict(mm_fit1))
+
+
+df_trial_instructed_pred %>%
+  ggplot(aes(y=model_pred_1, x = factor(reversed), color=origin_cs, group=interaction(origin_cs, group))) + 
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_boxplot(aes(group=interaction(reinfBlock, originCS))) +
+    #geom_point(alpha=.15) + 
+    geom_line(aes(group=interaction(id, origin_cs)), alpha=.15) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line') +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    theme_linedraw() +
+    facet_grid(group~cardiac_dir) +
+    theme(aspect.ratio = 1) +
+    NULL
+```
+
+
+#### Restrict analysis to second half of each block
+
+```{r}
+df_trial_instructed_half <- df_trial %>% filter(group=="instructed+") %>% filter(trial %in% c(10:20, 30:40, 50:60, 70:80))
+df_trial_uninstructed_half <- df_trial %>% filter(group=="instructed-") %>% filter(trial %in% c(10:20, 30:40, 50:60, 70:80))
+
+df_trial_instructed_half %>%
+  lmer(hr ~ decel_stim  * reversed + (1 | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit3 }
+summary(mm_fit3)
+
+df_trial_uninstructed_half %>%
+  filter(group=="instructed-") %>%
+  lmer(hr ~ decel_stim  * reversed + (1 | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit4 }
+summary(mm_fit4)
+```
+
+#### Restrict analysis to trials between instruction and reinforcement
+
+Select trials (it is dependent on the trial list)
+
+```{r}
+# select trials after instructed reversal but before new US,
+# and equal amount of trials before instructed reversal
+# LIST A
+# Before: +:17,18,19 / -:13,16,20 // +: 34,36,40 / -: 37,38,39 // +: 56,58,60 / -:55,57,59
+# After: +:21,22,25 / -: 23,26,(27) // +: 41,44,(46) / :- 42,43,45 // +: 63,64,66 / -: 61,62,65,(67)
+# LIST B
+# Before: + 16,18,19 / - 14,17,20 // + 32,35,37 / - 36,38,39,40 // + 56,57,59 / - 54,58,60
+# After: + 22,23,25,27 / - 21,24,26,(28) // +41,43,(45) / -42,44 // + 61,64 / - 62,63,65
+
+# List A before: 2 x 12 = 24 (without taking US trials that maybe I should take)
+selected_tr_A_bef <- c(16,18,19,20,36,38,39,40,57,58,59,60)
+selected_tr_A_aft <- c(22,25,23,26,41,43,44,45,62,64,65,66)
+selected_tr_B_bef <- c(18,19,17,20,35,37,39,40,57,59,58,60)
+selected_tr_B_aft <- c(25,27,24,26,41,43,42,44,61,64,63,65)
+ 
+df_trial_instructed_immediate <- df_trial %>% 
+  filter(group=="instructed+") %>%
+  mutate(sel = case_when((list=="trialListA" & trial %in% selected_tr_A_bef)~'pre',
+                         (list=="trialListA" & trial %in% selected_tr_A_aft)~'post',
+                         (list=="trialListB" & trial %in% selected_tr_B_bef)~'pre',
+                         (list=="trialListB" & trial %in% selected_tr_B_aft)~'post')) %>%
+  mutate(area = case_when((trial < 30)~1,
+                          (trial > 30 & trial < 50) ~ 2,
+                          (trial > 50 & trial < 70) ~ 3)) %>%  
+  drop_na() # remove all NA (in sel column)
+```
+
+
+
+```{r}
+
+df_trial_instructed_immediate %>%
+  lmer(hr ~ decel_stim  * reversed + instr_block + (1  | id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit5 }
+summary(mm_fit5)
+```
+
+
+# Broom clean methods to see LMEM outputs
+
+10.31234/osf.io/xp5cy
+
+```{r}
+broom.mixed::tidy(mm_fit5, effects = "ran_vals", conf.int=T)
+```
+
+#### Plot data
+
+```{r}
+
+id_summary_immediate <- df_trial_instructed_immediate %>%
+  group_by(id, group, origin_cs, decel_stim, reversed) %>%
+  summarize(val = mean(hr, na.rm = T), sd = sd(hr, na.rm = T)) %>%
+  #mutate(diff = case_when((cardiac_dir=="accelerator") ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]),
+                        #TRUE ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]))) %>%  #else
+  #mutate(diff_combined = case_when((cardiac_dir=="accelerator") ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"])*-1,
+                       # TRUE ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]))) %>%
+  group_by(decel_stim, group, reversed) %>%
+  mutate(group_val = mean(val))
+
+
+id_summary_immediate %>%
+  ggplot(aes(y=val, x = factor(reversed), color=decel_stim, group=interaction(decel_stim, group))) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_boxplot(aes(group=interaction(reinfBlock, originCS))) +
+    geom_jitter(alpha=.15, width=.01, height = .1) + 
+    geom_line(aes(group=interaction(id, decel_stim)), alpha=.2) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size = 1.) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = 1.5) +  # mean and SE
+    theme_minimal() + 
+    scale_color_OkabeIto() +
+    scale_y_continuous(limits=c(-10,100)) +
+    scale_x_discrete(labels=c("0" = "Original", "1" = "Reversed")) +
+    #facet_grid(.~cardiac_dir) +
+    theme(aspect.ratio = 1, 
+          axis.text.x = element_text(face="bold", size=14, angle=0),
+          axis.text.y = element_text(face="bold", size=12, angle=0),
+          legend.position = "bottom") +
+    labs(x = "",
+         color = "",
+         #title = "The difference between stimuli in RR \ninterval reverses after the instruction",
+         y = "Deceleration (ms)") +
+    NULL
+```
+
+
+#### Plot model prediction
+
+```{r}
+df_trial_instructed_immediate_pred <- df_trial_instructed_immediate %>%
+    #drop_na() %>%
+    mutate(model_pred_5 = predict(mm_fit5))
+
+
+df_trial_instructed_immediate_pred %>%
+  ggplot(aes(y=model_pred_5, x = factor(reversed), color=origin_cs, group=interaction(origin_cs, group))) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_boxplot(aes(group=interaction(reinfBlock, originCS))) +
+    #geom_point(alpha=.15) + 
+    geom_line(aes(group=interaction(id, origin_cs)), alpha=.4) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size = 1.) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = 1.) +  # mean and SE
+    theme_minimal() +
+    facet_grid(.~cardiac_dir) +
+    theme(aspect.ratio = 1) +
+    NULL
+```
+
+
+
+Plot the difference scores collapsed
+
+```{r fig.height=8}
+pd <- position_dodge(0.4)
+
+id_summary_diff %>%
+  # Plot
+  ggplot(aes(y=diff_combined, x = factor(instr_block), group=factor(group))) + #reversed_instr
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_point(aes(x = jitter(instr_block, 1)), alpha=.5) + 
+   # geom_line(aes(group=id, x = jitter(instr_block, 1)), alpha=.1) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line') +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .6) +  # mean and SE
+    theme_linedraw() +
+    facet_grid(group~cardiac_dir) +
+    #scale_y_continuous(limits=c(-70,70)) +
+    theme(aspect.ratio = 1) +
+    NULL
+```
+
+
+### ANOVA 
+
+#### Stimulus effect
+
+* One-sample t-test on absolute difference scores
+
+
+
+#### Block reversal effect by group
+
+
+### Linear Mixed Model with full trial data
+
+Start with full model including alll (n=62) participants.
+
+
+We are interested in 
+Fixed effects only (remains constant for individuals):
+* Group
+* Cardiac Direction 
+Both fixed and random effects (varies across individuals or sampling)
+* Reversal
+* Original Stimulus
+
+```{r}
+df_trial %>%
+  lmer(hr ~ group * origin_cs  * reversed * cardiac_dir + (1  | id), 
+       data=., 
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit1 }
+
+```
+
+
+Problem (becomes singular fit) if:
+Interaction `reversed:origin_cs` added in random slopes
+`Group *` fixed effect together with `reversed + origin_cs`
+OK to leave `Group *` if `reversed + origin_cs` random slopes are removed.
+
+
+```{r}
+summary(mm_fit1)
+#ranef(mm_fit1)
+
+```
+
+
+Effect of Stim: yes
+Effect of reversal: Yes
+
+#### Plot model prediction
+
+```{r}
+df_trial_pred <- df_trial %>%
+    #drop_na() %>%
+    mutate(model_pred = predict(mm_fit1))
+
+
+df_trial_pred %>%
+  ggplot(aes(y=model_pred, x = instr_block, color=origin_cs, group=interaction(origin_cs, group))) + 
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_boxplot(aes(group=interaction(reinfBlock, originCS))) +
+    #geom_point(alpha=.15) + 
+    #geom_line(aes(group=interaction(id, origin_cs)), alpha=.15) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line') +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    theme_linedraw() +
+    facet_grid(group~cardiac_dir) +
+    theme(aspect.ratio = 1) +
+    NULL
+```
+
+
+-----
+
+
+Export trial data for Arnaud
+
+To see: whether we normalise xn value
+
+```{r}
+df_trial_modeldata <- df_trial %>%
+  filter(group=="instructed-") %>%
+  select(id, group, trial, origin_cs, decel_stim, hr, us) %>%
+  mutate(us = case_when((us=="yes")~1, TRUE ~ 0)) %>%
+  transmute(id=id,
+            group=group,
+            trial=trial,
+            origin_cs=origin_cs,
+            decel_stim=decel_stim,
+            xn=hr,
+            rn=us)
+
+# Export to .csv
+#write.csv(df_trial_modeldata, file = "df_trial_model_data.csv" ,row.names = T, na="NaN")
+```
+
+=============
+EEG ANALYSIS
+=============
+
+CREATE FILES FOR MATLAB
+
+This is added for the eeg analyses. Export tables for each id with "reversed".
+
+```{r}
+
+trial_info <- psypy_data %>%
+  mutate(instr_block = case_when(trial < 21 ~ 1,
+                                (trial > 20 & trial < 41) ~ 2,
+                                (trial > 40 & trial < 61) ~ 3,
+                                (trial > 60 & trial < 81) ~ 4)) %>%
+  mutate(reinf_block = case_when((list=="trialListA" & trial < 28) ~ 1,
+                                (list=="trialListA" & trial > 27 & trial < 47) ~ 2,
+                                (list=="trialListA" & trial > 46 & trial < 68) ~ 3,
+                                (list=="trialListA" & trial > 67 & trial < 81) ~ 4,
+                                (list=="trialListB" & trial < 29) ~ 1,
+                                (list=="trialListB" & trial > 28 & trial < 46) ~ 2,
+                                (list=="trialListB" & trial > 45 & trial < 67) ~ 3,
+                                (list=="trialListB" & trial > 66 & trial < 81) ~ 4)) %>%
+  mutate(reversed_instr = case_when(
+                              (instr_block==1) ~ 0,
+                              (instr_block==2) ~ 1,
+                              (instr_block==3) ~ 0,
+                              (instr_block==4) ~ 1)) %>%
+  mutate(reversed_reinf = case_when(
+                              (reinf_block==1) ~ 0,
+                              (reinf_block==2) ~ 1,
+                              (reinf_block==3) ~ 0,
+                              (reinf_block==4) ~ 1)) %>%
+  mutate(reversed = case_when((group=="instructed-" & reinf_block==1) ~ 0,
+                              (group=="instructed-" & reinf_block==2) ~ 1,
+                              (group=="instructed-" & reinf_block==3) ~ 0,
+                              (group=="instructed-" & reinf_block==4) ~ 1,
+                              (group=="instructed+" & instr_block==1) ~ 0,
+                              (group=="instructed+" & instr_block==2) ~ 1,
+                              (group=="instructed+" & instr_block==3) ~ 0,
+                              (group=="instructed+" & instr_block==4) ~ 1))
+```
+
+```{r eval=F}
+trial_info_summ <- trial_info %>%
+  group_by(id, trial) %>%
+  summarise(reversed = first(reversed))
+
+#convert to subjects x trial table
+
+nsuj <- 1:70
+info_table <- matrix(data=NA, nrow=80, ncol=70)  #empty table
+
+for (i in nsuj) {
+  reversal_info <- (trial_info_summ %>% filter(id==i))$reversed
+  info_table[,i] <- reversal_info
+}
+
+write.csv(info_table, "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/ALR/analysis/eeg/scripts/trial_info.csv", row.names = FALSE, col.names = FALSE)
+
+```
+
+
+
+
+====
+ANALYSE EEG DATA
+====
+
+
+
+```{r}
+
+erp_path <- '/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/ALR/analysis/eeg/scripts/erp_table.csv'
+
+erp <- read_csv(file.path(erp_path),  # the function read_csv() from the readr package
+                 col_names = c("id", "trial", "erp_type", "value"), 
+                 col_types = cols("i", "i", "i", "d"), 
+                 na = c("NaN"))
+
+#rename erp_type levels
+erp <- erp %>%
+  mutate(erp_type = recode(erp_type, `1` = "P1", `2` = "N170", `3` = "LPP"))
+
+```
+
+
+```{r}
+# merge with psypy data
+erp_df <- inner_join(erp, trial_info, by = c("id", "trial"))
+
+# add accel/decel data
+erp_df <- full_join(erp_df, id_first_block_categorisation, by=c("id"), keep=T)
+
+erp_df <- erp_df %>%
+  mutate(decel_stim = case_when((cardiac_dir=="decelerator" & origin_cs=='CS+') ~ 'Decelerating Stimulus',
+                                (cardiac_dir=="decelerator" & origin_cs=='CS-') ~ 'Accelerating Stimulus',
+                                (cardiac_dir=="accelerator" & origin_cs=='CS+') ~ 'Accelerating Stimulus',
+                                (cardiac_dir=="accelerator" & origin_cs=='CS-') ~ 'Decelerating Stimulus'))
+
+```
+
+```{r eval=F}
+
+erp_df %>%
+  #filter(group=="instructed+") %>%
+  #filter(reversed==0) %>%
+  filter(erp_type=='LPP') %>%
+  #filter(value>-20 & value<20) %>%
+    ggplot(aes(y=value, x=trial)) +
+      geom_point() +
+  geom_hline(yintercept=30, color='red') + 
+  geom_hline(yintercept=-30, color='red') + 
+      #geom_boxplot() +
+      #facet_grid(.~factor(instr_block)) +
+  labs(y="value uV",
+       title = 'all trials all participants merged') +
+  #scale_y_continuous(limits = c(-500, 500)) +
+  NULL
+
+```
+
+Create summaries for each ERP and id and condition
+
+```{r eval = F}
+
+# Get per block, diff score
+erp_df_id_collapsed <- erp_df %>%
+  group_by(id, group, reversed, origin_cs, erp_type) %>%
+  summarize(val = mean(value, na.rm = T), sd = sd(value, na.rm = T), se  = sd(value, na.rm = T)/n(), ci  = 1.96*se) %>%
+  #mutate(diff = case_when((cardiac_dir=="accelerator") ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]),
+                        #TRUE ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]))) %>%  #else
+  #mutate(diff_combined = case_when((cardiac_dir=="accelerator") ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"])*-1,
+                       # TRUE ~ (val[decel_stim=="CS+"] - val[decel_stim=="CS-"]))) %>%
+  group_by(origin_cs, group, reversed, erp_type) %>%
+  mutate(group_val = mean(val), group_se = mean(se), group_ci = mean(ci))
+```
+
+Plot all ERPs
+
+```{r}
+dodge_width = .3
+pd <- position_dodge(width=dodge_width)
+
+  # Plot
+erp_df %>%
+  filter(abs(first_diff)>5) %>%
+  filter(erp_type %in% c('N170','LPP')) %>%
+  #filter(!(id %in% c(6,21,15,25,40,54,60,65,67))) %>% # excluded
+  #filter(instr_block==1)%>%
+  #filter(cardiac_dir=="accelerator") %>%
+  #filter(group=="instructed-") %>%
+  #ggplot(aes(y=value, x = factor(reversed, labels=c("Normal", "Reversed")), color=origin_cs, group=origin_cs)) +
+  ggplot(aes(y=value, x = factor(instr_block), color=origin_cs, group=origin_cs)) + 
+
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(fill=origin_cs, color=NA),  position=pd, alpha=.4, width=.7) +
+    #geom_jitter(alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    #geom_point(aes(y=group_val), size = 4., position=pd, shape=21, color='white') +
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, origin_cs)), alpha=.15, position=pd) +
+    #geom_line(aes(y=group_val, group=interaction(origin_cs, group), linetype=origin_cs), size=1., position=pd) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', position=pd, aes(linetype=origin_cs)) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .3, position=pd) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    #facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(group, levels=c("instructed+", "instructed-"), labels=c('Instructed', 'Uninstructed')), scales="free_y") +
+  facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(cardiac_dir), scales="free_y") +
+  #facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~., scales="free_y") +
+    theme(aspect.ratio = 1, 
+          legend.position="bottom", 
+          panel.spacing = unit(1., "lines"),
+          #axis.text.x = element_text(angle=45)
+          ) +
+    #scale_y_continuous(limits=c(0,10)) +
+   labs(
+      #title = "ERP modulation by contingency \nreversals (Instructed group)",
+       #subtitle = "",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Learning Block", y = "Amplitude (µV)", 
+       color = 'Stimulus Type', fill = 'Stimulus Type', linetype = 'Stimulus Type') +
+    NULL
+```
+
+
+Plot all ERPs with within-subject error bars
+
+```{r}
+dodge_width = .2
+pd <- position_dodge(width=dodge_width)
+
+# Get per block, diff scor
+            
+erp_df_id_collapsed <- erp_df %>%
+  filter(abs(first_diff)>5) %>%
+  group_by(id, instr_block, cardiac_dir, origin_cs, erp_type) %>%
+  summarise(cond_val = mean(value, na.rm=T)) %>%
+  group_by(id) %>%
+  mutate(ind_val = mean(cond_val, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(group_val = mean(ind_val, na.rm=T)) %>%
+  group_by(id, instr_block, cardiac_dir, origin_cs, erp_type) %>%
+  mutate(new_val = cond_val - ind_val + group_val) %>%
+  group_by(instr_block, cardiac_dir, origin_cs, erp_type) %>%
+  mutate(sd      = sd(new_val, na.rm = T)) %>% 
+  mutate(se      = sd(new_val, na.rm = T)/sqrt(n_distinct(id))) %>%    #/n(), 
+  mutate(ci      = 1.96*se) %>%
+  group_by(instr_block, cardiac_dir, origin_cs, erp_type) %>%
+  mutate(val = mean(cond_val))
+            
+  # Plot
+erp_df_id_collapsed %>%
+  #ggplot(aes(y=value, x = factor(reversed, labels=c("Normal", "Reversed")), color=origin_cs, group=origin_cs)) +
+  ggplot(aes(y=val, x = factor(instr_block), color=origin_cs, group=origin_cs)) + 
+
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(fill=origin_cs, color=NA),  position=pd, alpha=.4, width=.7) +
+    #geom_jitter(aes(y=group_val), alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    geom_point(aes(y=val), size = .5, position=pd) +
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, origin_cs)), alpha=.5, position=pd) +
+    geom_line(aes(y=val, group=origin_cs), position=pd) +
+    geom_ribbon(aes(ymin = val-ci, ymax = val+ci, fill=origin_cs, color=NULL), alpha = .4) +
+    #stat_summary(fun.data = mean_cl_boot, geom = 'line', position=pd) +  # this will create lines between the x factor levels
+    #stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .3, position=pd) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    #facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(group, levels=c("instructed+", "instructed-"), labels=c('Instructed', 'Uninstructed')), scales="free_y") +
+  facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(cardiac_dir), scales="free_y") +
+    theme(aspect.ratio = 1, 
+          legend.position="bottom", 
+          panel.spacing = unit(1., "lines"),
+          axis.text.x = element_text(angle=45)) +
+    #scale_y_continuous(limits=c(0,10)) +
+   labs(title = "ERP modulation by \ncontingency reversals",
+       #subtitle = "",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Amplitude uV", 
+       color = 'Conditioned Response', fill = 'Conditioned Response', linetype = 'Conditioned Response') +
+    NULL
+```
+
+
+Stats
+
+```{r}
+
+erp_df_exclusions <- erp_df %>%
+  filter(abs(first_diff)>5) %>%
+  filter(!(id %in% excluded_eeg)) %>% # excluded
+  filter(!(id %in% excluded_gen)) %>% # excluded
+  mutate(n = n_distinct(id))
+
+erp_df_learners_n170 <- erp_df_exclusions %>%
+  filter(erp_type=='N170')
+
+erp_df_learners_lpp <- erp_df_exclusions %>%
+  filter(erp_type=='LPP')
+```
+
+
+
+```{r}
+
+erp_df_learners_n170 %>%
+    group_by(group, cardiac_dir) %>% 
+    summarise(n=n()/80)# %>%
+```
+
+
+```{r}
+tbl1 <- matrix(c(1,3,3,3),ncol=2,byrow=TRUE)
+colnames(tbl1) <- c("I+","I-")
+rownames(tbl1) <- c("accel","decel")
+chisq.test(tbl1)
+
+tbl2 <- matrix(c(13,19,14,11),ncol=2,byrow=TRUE)
+colnames(tbl2) <- c("I+","I-")
+rownames(tbl2) <- c("accel","decel")
+chisq.test(tbl2)
+```
+
+
+```{r}
+erp_df_learners_n170 %>%
+  lmer(value ~ factor(origin_cs) * reversed + instr_block + (1 |id), 
+       data=.,
+       REML=F,
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))
+       ) %>%
+  {. ->> mm_erp_fit3 }
+summary(mm_erp_fit3)
+
+erp_df_learners_n170 %>%
+  lmer(value ~ factor(decel_stim) * reversed + instr_block + (1 |id), 
+       data=.,
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_erp_fit4 }
+summary(mm_erp_fit4)
+
+anova(mm_erp_fit3, mm_erp_fit4)
+```
+
+```{r}
+erp_df_learners_lpp %>%
+  #filter(group=="instructed+") %>%
+  #filter(cardiac_dir=="decelerator") %>%
+  lmer(value ~ factor(origin_cs) * reversed + instr_block + (1 |id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_erp_fit5 }
+summary(mm_erp_fit5)
+
+erp_df_learners_lpp %>%
+  lmer(value ~ factor(decel_stim) * reversed + instr_block + (1 |id), 
+       data=.,
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_erp_fit6 }
+summary(mm_erp_fit6)
+
+anova(mm_erp_fit5, mm_erp_fit6)
+```
+
+
+#### Plot model prediction
+
+```{r}
+erp_def_pred <- erp_df %>%
+    filter(abs(first_diff)>5) %>%
+    filter(erp_type=='N170') %>%
+    drop_na() %>%
+    mutate(model_pred_1 = predict(mm_erp_fit))
+  
+  #filter(cardiac_dir=="accelerator") %>%
+  #filter(group=="instructed+") %>%
+  #ggplot(aes(y=value, x = factor(reversed, labels=c("Normal", "Reversed")), color=origin_cs, group=origin_cs)) +
+  ggplot(aes(y=model_pred_1, x = factor(instr_block), color=origin_cs, group=origin_cs)) + 
+
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(fill=origin_cs, color=NA),  position=pd, alpha=.4, width=.7) +
+    #geom_jitter(alpha=.3, position=position_jitterdodge(jitter.width = .1, jitter.height = 0, dodge.width = dodge_width)) + 
+    #geom_point(aes(y=group_val), size = 4., position=pd, shape=21, color='white') +
+    #geom_line(aes(x = jitter(instr_block, 0), group=interaction(id, origin_cs)), alpha=.15, position=pd) +
+    #geom_line(aes(y=group_val, group=interaction(origin_cs, group), linetype=origin_cs), size=1., position=pd) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', position=pd) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .3, position=pd) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_fill_OkabeIto() +
+    theme_minimal() +
+    #facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(group, levels=c("instructed+", "instructed-"), labels=c('Instructed', 'Uninstructed')), scales="free_y") +
+  facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(cardiac_dir), scales="free_y") +
+    theme(aspect.ratio = 1, 
+          legend.position="bottom", 
+          panel.spacing = unit(1., "lines"),
+          axis.text.x = element_text(angle=45)) +
+    #scale_y_continuous(limits=c(0,10)) +
+   labs(title = "Model fit",
+       #subtitle = "",
+       #caption = "Each dot represents the average of one individual.", 
+       x = "Block", y = "Amplitude uV", 
+       color = 'Conditioned Response', fill = 'Conditioned Response', linetype = 'Conditioned Response') +
+    NULL
+```
+
+
+```{r}
+df_trial_instructed_immediate <- erp_df %>% 
+  #filter(group=="instructed+") %>%
+  filter(abs(first_diff)>5) %>%
+  filter(!(id %in% c(6,21,15,25,40,54,60,65,67))) %>% # excluded
+  #filter(erp_type=='P1')
+  mutate(sel = case_when((list=="trialListA" & trial %in% selected_tr_A_bef)~'pre',
+                         (list=="trialListA" & trial %in% selected_tr_A_aft)~'post',
+                         (list=="trialListB" & trial %in% selected_tr_B_bef)~'pre',
+                         (list=="trialListB" & trial %in% selected_tr_B_aft)~'post')) %>%
+  mutate(area = case_when((trial < 30)~1,
+                          (trial > 30 & trial < 50) ~ 2,
+                          (trial > 50 & trial < 70) ~ 3)) %>%  
+  drop_na() # remove all NA (in sel column)
+
+dodge_width = .2
+pd <- position_dodge(width=dodge_width)
+
+df_trial_instructed_immediate %>%
+    filter(erp_type %in% c('N170','LPP')) %>%
+  ggplot(aes(y=value, x = factor(reversed), color=origin_cs, group=origin_cs)) + 
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_boxplot(aes(group=interaction(reinfBlock, originCS))) +
+    #geom_jitter(alpha=.15, width=.01, height = .1) + 
+    #geom_line(aes(group=interaction(id, decel_stim)), alpha=.2) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', position=pd) +  # this will create lines between the x factor levels
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .3, position=pd) +  # mean and SE
+    theme_minimal() +
+    scale_color_OkabeIto() +
+    #scale_y_continuous(limits=c(-10,100)) +
+    scale_x_discrete(labels=c("0" = "Original", "1" = "Reversed")) +
+    facet_grid(factor(erp_type, levels=c('P1', 'N170', 'LPP'))~factor(cardiac_dir), scales="free_y") + #factor(cardiac_dir)
+    theme(aspect.ratio = 1, 
+          axis.text.x = element_text(face="bold", size=14, angle=0),
+          #axis.text.y = element_text(face="bold", size=12, angle=0)
+          ) +
+    labs(x = "",
+         y = "RR interval change (ms)",
+         title = "The difference between stimuli in RR \ninterval reverses after the instruction") +
+    NULL
+
+
+
+df_trial_instructed_immediate %>%
+  filter(erp_type=='N170') %>%
+  lmer(value ~ factor(decel_stim) * reversed + instr_block + (1 |id), 
+       data=.,
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_erp_fit7 }
+summary(mm_erp_fit7)
+df_trial_instructed_immediate %>%
+  filter(erp_type=='LPP') %>%
+  lmer(value ~ factor(origin_cs) * reversed + instr_block + (1 |id), 
+       data=.,
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_erp_fit8 }
+summary(mm_erp_fit8)
+anova(mm_erp_fit7, mm_erp_fit8)
+
+```
+```
+
+
+
+
+
+```{r}
+erp_hr <- full_join(erp_df, df_trial, by=c("id", "trial"))
+  
+erp_hr %>%
+  filter(erp_type=='LPP') %>%
+  filter(origin_cs.x=="CS-") %>%
+  filter(hr>-30 & hr<30) %>%
+  drop_na() %>%
+  ggplot(aes(x=hr, y=value, color=factor(origin_cs.x))) +
+    geom_point() +
+    #facet_grid(cardiac_dir.x~.) + 
+    geom_smooth(method='lm')
+
+```

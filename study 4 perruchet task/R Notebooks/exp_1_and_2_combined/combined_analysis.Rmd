@@ -1,0 +1,309 @@
+---
+title: "R Analysis Notebook: Subjective and cardiac responses, Perruchet 3"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library('tidyverse')  
+library('lmerTest')
+library('colorblindr')  # for colorblind proof color scales
+```
+
+Load the data
+
+The id numbers have been adapted so that they are different in exp 2 from exp 2 
+(so not necessary to nest the `id` in the `group` as the id's are already 
+different between groups)
+
+
+```{r load, include=FALSE}
+
+# folder containing individual datasets 
+path <- '/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/PC/combined/'
+
+# read each selected file and combine into a unique dataframe
+data_exp1_e1 <- read_csv(file.path(path, 'data_hr_e1_exp1.csv'), col_names=T) %>%
+  mutate(exp = 'Experiment 1')
+data_exp2_e1 <- read_csv(file.path(path, 'data_hr_e1_exp2.csv'), col_names=T) %>%
+  mutate(exp = 'Experiment 2')
+
+data_exp1_e2 <- read_csv(file.path(path, 'data_hr_e2_exp1.csv'), col_names=T)%>%
+  mutate(exp = 'Experiment 1')
+data_exp2_e2 <- read_csv(file.path(path, 'data_hr_e2_exp2.csv'), col_names=T) %>%
+  mutate(exp = 'Experiment 2')
+
+# bind together for each event (E1 or E2)
+e1 <- bind_rows(data_exp1_e1, data_exp2_e1)
+e2 <- bind_rows(data_exp1_e2, data_exp2_e2)
+```
+
+# Combined groups LMEM for E1 responses
+
+```{r}
+e1 %>%
+  lmer(hr ~ exp + pooled_order + cond_lag + exp:pooled_order + exp:cond_lag + trial + (1|id), 
+       data=., 
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit1 } 
+
+summary(mm_fit1)
+```
+
+# Combined groups LMEM for E2 responses
+
+```{r}
+e2 %>%
+  lmer(hr ~ exp*count_lag + trial + (1|id), 
+       data=., 
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit2 } 
+
+summary(mm_fit2)
+```
+
+
+
+```{r}
+e2 %>%
+    drop_na() %>%
+    mutate(model_pred = predict(mm_fit2)) %>%
+    mutate(graph_order_2 = case_when((condition=='CS' & count_lag==1) ~ 3,
+                                 (condition=='CS' & count_lag==2) ~ 2,
+                                 (condition=='CS' & count_lag==3) ~ 1,
+                                 condition=='CS-US' ~ count_lag+3)) %>%
+   filter(condition=='CS-US') %>%
+  ggplot(aes(y=model_pred, x = factor(graph_order_2), group=condition)) + # Remove group to have continuous line
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(y=val, group=factor(graph_order_2), fill=condition, color=NA), alpha=.4) +
+    #geom_jitter(aes(y=val, group=interaction(id, factor(graph_order_2)), color=condition), alpha=.25, width=.1, height=.05) +
+    #geom_ribbon(aes(ymin = group_val-group_se, ymax = group_val+group_se, color=NULL,), alpha = .15) +
+    #geom_line(aes(group=condition)) +
+    #geom_point(aes(y=group_val, color=factor(graph_order_2)), size = 3.) +
+    #geom_line(alpha = .2, aes(color = slope)) +
+    theme_linedraw() +
+       theme(aspect.ratio = 1,
+          legend.position = "none",
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    #scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_colour_brewer(palette = "Set1") +
+    #scale_fill_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    #scale_y_reverse() +
+    facet_grid(.~exp)+
+    scale_x_discrete(labels=c("1" = "3", 
+                              "2" = "2", 
+                              "3" = "1", 
+                              "4" = "1", 
+                              "5" = "2", 
+                              "6" = "3")) +
+    labs(
+      #title = "Cardiac response after loud noise onset or silence",
+       subtitle = "", 
+       #caption = "Cardiac reactivity is derived for each trial as the 
+#largest increase in inter-beat interval with respect to 
+#baseline across three heatbeats after after the onset of 
+#the tone (CS) preceding the loud noise (US).
+#A run is a sequence of consecutive trials of the same type", 
+       x = "Length of Preceding Run", y = "Mean Δ Heart Rate (BPM)", 
+       color = 'Type of \nCurrent Run', fill = 'Type of \nCurrent Run') +
+    NULL
+```
+
+
+
+# Bayes Factor on Individual slopes
+
+ 
+ 
+```{r}
+# FULL MODEL FOR THE GRAPH (DOES NOT CONVERGE)
+e1 %>%
+  filter(exp=='Experiment 1') %>%
+  lmer(hr ~ cond_lag + pooled_order  + trial + (1+pooled_order+cond_lag|id),  #count_lag
+       data=., 
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit3 } 
+
+summary(mm_fit3)
+```
+
+
+might need to calculate slope separately for each cond?
+
+```{r}
+# Weird slopes 
+# https://stackoverflow.com/questions/50181772/line-color-and-width-by-slope-in-ggplot2
+# colors are calculated manually from model results
+# geom_smooth lm used for drawing
+
+slope_graph_1 <- e1 %>%
+    filter(exp=='Experiment 1') %>%
+    drop_na() %>%
+    mutate(model_pred = predict(mm_fit3)) %>%
+    group_by(id) %>% 
+    mutate(slope = (mean(model_pred[graph_order==8]) - mean(model_pred[graph_order==1]))/(2-1)) %>% 
+    ungroup() 
+  
+ slope_graph_1 %>% 
+      ggplot(aes(y=model_pred, x = factor(pooled_order))) + # Remove group to have continuous line
+      geom_hline(yintercept=0, linetype="dashed") +
+      #geom_line(alpha = .2,  aes(color = slope, group=id)) +
+      geom_smooth(method='lm', se=F, aes(group=interaction(cond_lag, id), color = slope), size=.5) +
+      theme_bw() +
+      scale_color_viridis_c()+
+      theme(aspect.ratio = 1,
+          strip.background = element_rect(fill="white"), 
+          #legend.position = 'right',
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", size=0.5, linetype="solid")) +
+      scale_x_discrete(labels=c("1" = "4", 
+                              "2" = "3", 
+                              "3" = "2", 
+                              "4" = "1", 
+                              "5" = "1", 
+                              "6" = "2", 
+                              "7" = "3", 
+                              "8" = "4")) +
+      #scale_y_reverse() +
+      scale_y_continuous(limits = c(-2.5,10)) +
+      facet_grid(.~exp) +
+      labs(
+      #title = "Best model fit for cardiac deceleration",
+      #subtitle = "The best model fit includes negative 'Level' \nparameter", 
+      #caption = "", 
+       x = "Length of Preceding Run", y = "Mean Δ Heart Rate (BPM)",
+       color = 'Individual \nSlope') +
+    NULL
+```
+
+Obtain list of slopes, mean and SD for the prior (Experiment 1)
+
+```{r}
+res <- coef(mm_fit3)
+slopes <- tbl_df(res$id$pooled_order)
+slopes <- slopes %>% mutate(id =  rownames(res$id))
+
+mean_slopes <- mean(slopes$value)
+sd_slopes <- sd(slopes$value)
+qqnorm(slopes$value); qqline(slopes$value)
+
+hist(slopes$value)
+```
+
+
+Calculate the mean and SD for the sample (exp 2)
+
+```{r}
+# FULL MODEL FOR THE GRAPH (DOES NOT CONVERGE)
+e1 %>%
+  filter(exp=='Experiment 2') %>%
+  lmer(hr ~ cond_lag + pooled_order  + trial + (1+pooled_order+cond_lag|id),  #count_lag
+       data=., 
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit4 } 
+
+summary(mm_fit4)
+```
+
+```{r}
+res_exp2 <- coef(mm_fit4)
+slopes_exp2 <- tbl_df(res_exp2$id$pooled_order)
+slopes_exp2 <- slopes_exp2 %>% mutate(id =  rownames(res_exp2$id))
+
+mean_slopes_exp2 <- mean(slopes_exp2$value)
+sd_slopes_exp2 <- sd(slopes_exp2$value)
+se_slopes_exp2 <- sd_slopes_exp2/sqrt(n_distinct(slopes$id))
+qqnorm(slopes_exp2$value); qqline(slopes_exp2$value)
+
+hist(slopes_exp2$value)
+```
+
+
+
+```{r}
+# Weird slopes 
+# https://stackoverflow.com/questions/50181772/line-color-and-width-by-slope-in-ggplot2
+# colors are calculated manually from model results
+# geom_smooth lm used for drawing
+
+slope_graph_2 <- e1 %>%
+    filter(exp=='Experiment 2') %>%
+    drop_na() %>%
+    mutate(model_pred = predict(mm_fit4)) %>%
+    group_by(id) %>% 
+    mutate(slope = (mean(model_pred[graph_order==8]) - mean(model_pred[graph_order==1]))/(2-1)) %>% 
+    ungroup() 
+  
+ slope_graph_2 %>% 
+      ggplot(aes(y=model_pred, x = factor(pooled_order))) + # Remove group to have continuous line
+      geom_hline(yintercept=0, linetype="dashed") +
+      #geom_line(alpha = .2,  aes(color = slope, group=id)) +
+      geom_smooth(method='lm', se=F, aes(group=interaction(cond_lag, id), color = slope), size=.5) +
+      theme_linedraw() +
+      scale_color_viridis_c()+
+      theme(aspect.ratio = 1,
+          #legend.position = 'right',
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", size=0.5, linetype="solid")) +
+      scale_x_discrete(labels=c("1" = "4", 
+                              "2" = "3", 
+                              "3" = "2", 
+                              "4" = "1", 
+                              "5" = "1", 
+                              "6" = "2", 
+                              "7" = "3", 
+                              "8" = "4")) +
+      #scale_y_reverse() +
+      scale_y_continuous(limits = c(-2.5,10)) +
+      facet_grid(.~exp) +
+      labs(
+      #title = "Best model fit for cardiac deceleration",
+      #subtitle = "The best model fit includes negative 'Level' \nparameter", 
+      #caption = "", 
+       x = "Length of Preceding Run", y = "Mean Δ Heart Rate (BPM)",
+       color = 'Individual \nSlope') +
+    NULL
+```
+
+
+
+
+COmbined plots
+
+
+```{r}
+
+combi <- bind_rows(slope_graph_1, slope_graph_2)
+
+combi %>% 
+      filter(cond_lag=='CS-US') %>%
+      ggplot(aes(y=model_pred, x = factor(pooled_order))) + # Remove group to have continuous line
+      geom_hline(yintercept=0, linetype="dashed") +
+      #geom_line(alpha = .2,  aes(color = slope, group=id)) +
+      geom_smooth(method='lm', se=F, aes(group=interaction(cond_lag, id), color = slope), size=.3) +
+      theme_bw() +
+      scale_color_viridis_c(option='viridis')+
+      theme(
+          aspect.ratio = 1.75,
+          strip.background = element_rect(fill="white"), 
+          legend.position = 'bottom',
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", size=0.5, linetype="solid")) +
+      #scale_y_reverse() +
+      scale_y_continuous(limits = c(-2.5,10)) +
+      facet_grid(.~exp) +
+      labs(
+      #title = "Best model fit for cardiac deceleration",
+      #subtitle = "The best model fit includes negative 'Level' \nparameter", 
+      #caption = "Slope is equivalent", 
+       x = "Length of Preceding Run (E1-E2)", y = "Mean Δ Heart Rate (BPM)",
+       color = 'Individual \nSlope') +
+    NULL
+```

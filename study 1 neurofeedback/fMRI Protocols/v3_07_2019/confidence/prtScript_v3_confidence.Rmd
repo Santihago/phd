@@ -1,0 +1,872 @@
+---
+title: "fMRIProcotolFiles"
+output: html_notebook
+---
+
+The goal of this file is to output protocol files with specific weight parameters for each run/session/id.
+
+```{r}
+library(tidyverse)
+library(glue)
+```
+
+Get the data from the behavioural logfile dataframe
+
+```{r}
+#load data about ratings
+#! different sourcefile vs. previous prts
+d <- read_csv("/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/prtCreation/v3_07_2019/df.csv")
+d <- d %>% drop_na()
+
+#create session-dependent run numbering (1-6 instead of 1-18)
+d <- d %>% mutate(run2 = case_when((session == 2 & run == 7) ~ 1,
+                                   (session == 2 & run == 8) ~ 2,
+                                   (session == 2 & run == 9) ~ 3,
+                                   (session == 2 & run == 10) ~ 4,
+                                   (session == 2 & run == 11) ~ 5,
+                                   (session == 2 & run == 12) ~ 6,
+                                   (session == 3 & run == 13) ~ 1,
+                                   (session == 3 & run == 14) ~ 2,
+                                   (session == 3 & run == 15) ~ 3,
+                                   (session == 3 & run == 16) ~ 4,
+                                   (session == 3 & run == 17) ~ 5,
+                                   (session == 3 & run == 18) ~ 6,
+                                   (session==1) ~ run))
+```
+
+```{r}
+id_list <- c(2,4,5,6,7,8,9,11)  # participant numbers of those not excluded
+session_list <- c(2,3,4)  # number of the sessions
+```
+
+# Run 1
+
+```{r}
+# Loop this run for the 8 participants and the 3 sessions
+for (this_id in id_list) { 
+  for (this_session in session_list) {
+    
+    #set info
+    this_run <- 1
+    
+    #create folder
+    path <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/prtCreation/v3_07_2019/confidence/"
+    dir.create(file.path(path, glue("P0{this_id}")))
+    dir.create(file.path(path, glue("P0{this_id}"), glue("S0{this_session}")))
+    
+    #set filename
+    fileName<-file(glue("P0{this_id}_S0{this_session}_run{this_run}.prt"))
+    
+    #select data for this run
+    session_code <- this_session-1
+    thisData <- d %>% filter(id==this_id & session==session_code & run2==this_run)
+    
+    #set some values
+    nothingWeight <- 1
+    rDiffTr1 <- thisData$conf[1]
+    rDiffTr2 <- thisData$conf[2]
+    rDiffTr3 <- thisData$conf[3]
+    rDiffTr4 <- thisData$conf[4]
+    rDiffTr5 <- thisData$conf[5]
+    rDiffTr6 <- thisData$conf[6]
+    rDiffTr7 <- thisData$conf[7]
+    rDiffTr8 <- thisData$conf[8]
+    rDiffTr9 <- thisData$conf[9]
+    
+    #compile the text
+    thisText <- glue("FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P0{this_id}_S0{this_session}_run{this_run}
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 {nothingWeight}
+  50   65 {nothingWeight}
+ 100  115 {nothingWeight}
+ 151  166 {nothingWeight}
+ 199  214 {nothingWeight}
+ 249  264 {nothingWeight}
+ 300  315 {nothingWeight}
+ 349  364 {nothingWeight}
+ 398  413 {nothingWeight}
+ 449  464 {nothingWeight}
+ 500  515 {nothingWeight}
+Color: 230 25 75
+
+task6
+5
+  17   32 {rDiffTr1}
+  66   81 {rDiffTr2}
+ 167  182 {rDiffTr4}
+ 265  280 {rDiffTr6}
+ 316  331 {rDiffTr7}
+Color: 234 209 93
+
+task9
+5
+ 116  131 {rDiffTr3}
+ 215  230 {rDiffTr5}
+ 365  380 {nothingWeight}
+ 414  429 {rDiffTr8}
+ 465  480 {rDiffTr9}
+Color: 82 210 115
+
+rating
+9
+  35   40 {nothingWeight}
+  83   88 {nothingWeight}
+ 134  139 {nothingWeight}
+ 184  189 {nothingWeight}
+ 234  239 {nothingWeight}
+ 283  288 {nothingWeight}
+ 333  338 {nothingWeight}
+ 433  438 {nothingWeight}
+ 484  489 {nothingWeight}
+Color: 220 220 220
+
+confidence
+9
+  42   47 {rDiffTr1}
+  92   97 {rDiffTr2}
+ 143  148 {rDiffTr3}
+ 191  196 {rDiffTr4}
+ 241  246 {rDiffTr5}
+ 292  297 {rDiffTr6}
+ 341  346 {rDiffTr7}
+ 441  446 {rDiffTr8}
+ 492  497 {rDiffTr9}
+Color: 150 150 150
+
+feedback
+10
+  48   49 {nothingWeight}
+  98   99 {nothingWeight}
+ 149  150 {nothingWeight}
+ 197  198 {nothingWeight}
+ 247  248 {nothingWeight}
+ 298  299 {nothingWeight}
+ 347  348 {nothingWeight}
+ 396  397 {nothingWeight}
+ 447  448 {nothingWeight}
+ 498  499 {nothingWeight}
+Color: 245 130 48
+
+ratingcatch
+1
+ 383  388 {nothingWeight}
+Color: 56 181 169
+
+confcatch
+1
+ 390  395 {nothingWeight}
+Color: 255 117 211")
+    
+    
+    #write to file
+    writeLines(thisText, fileName)
+    close(fileName)
+  }
+}
+```
+
+# Run 2
+
+```{r}
+# Loop this run for the 8 participants and the 3 sessions
+for (this_id in id_list) { 
+  for (this_session in session_list) {
+    
+    #set info
+    this_run <- 2
+    
+    #set filename
+    fileName<-file(glue("P0{this_id}_S0{this_session}_run{this_run}.prt"))
+    
+    #select data for this run
+    session_code <- this_session-1
+    thisData <- d %>% filter(id==this_id & session==session_code & run2==this_run)
+    
+    #set some values
+    nothingWeight <- 1
+    rDiffTr1 <- thisData$conf[1]
+    rDiffTr2 <- thisData$conf[2]
+    rDiffTr3 <- thisData$conf[3]
+    rDiffTr4 <- thisData$conf[4]
+    rDiffTr5 <- thisData$conf[5]
+    rDiffTr6 <- thisData$conf[6]
+    rDiffTr7 <- thisData$conf[7]
+    rDiffTr8 <- thisData$conf[8]
+    rDiffTr9 <- thisData$conf[9]
+    
+    #compile the text
+    thisText <- glue("FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P0{this_id}_S0{this_session}_run{this_run}
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 {nothingWeight}
+  51   66 {nothingWeight}
+ 101  116 {nothingWeight}
+ 149  164 {nothingWeight}
+ 200  215 {nothingWeight}
+ 249  264 {nothingWeight}
+ 300  315 {nothingWeight}
+ 352  367 {nothingWeight}
+ 400  415 {nothingWeight}
+ 451  466 {nothingWeight}
+ 500  515 {nothingWeight}
+Color: 230 25 75
+
+task6
+5
+  17   32 {rDiffTr1}
+ 117  132 {rDiffTr3}
+ 216  231 {rDiffTr5}
+ 368  383 {rDiffTr8}
+ 467  482 {nothingWeight}
+Color: 234 209 93
+
+task9
+5
+  67   82 {rDiffTr2}
+ 165  180 {rDiffTr4}
+ 265  280 {rDiffTr6}
+ 316  331 {rDiffTr7}
+ 416  431 {rDiffTr9}
+Color: 82 210 115
+
+rating
+9
+  35   40 {nothingWeight}
+  86   91 {nothingWeight}
+ 134  139 {nothingWeight}
+ 183  188 {nothingWeight}
+ 233  238 {nothingWeight}
+ 283  288 {nothingWeight}
+ 335  340 {nothingWeight}
+ 385  390 {nothingWeight}
+ 435  440 {nothingWeight}
+Color: 220 220 220
+
+confidence
+9
+  43   48 {rDiffTr1}
+  93   98 {rDiffTr2}
+ 141  146 {rDiffTr3}
+ 192  197 {rDiffTr4}
+ 241  246 {rDiffTr5}
+ 292  297 {rDiffTr6}
+ 344  349 {rDiffTr7}
+ 392  397 {rDiffTr8}
+ 443  448 {rDiffTr9}
+Color: 150 150 150
+
+feedback
+10
+  49   50 {nothingWeight}
+  99  100 {nothingWeight}
+ 147  148 {nothingWeight}
+ 198  199 {nothingWeight}
+ 247  248 {nothingWeight}
+ 298  299 {nothingWeight}
+ 350  351 {nothingWeight}
+ 398  399 {nothingWeight}
+ 449  450 {nothingWeight}
+ 498  499 {nothingWeight}
+Color: 245 130 48
+
+ratingcatch
+1
+ 485  490 {nothingWeight}
+Color: 56 181 169
+
+confcatch
+1
+ 492  497 {nothingWeight}
+Color: 255 117 211")
+    
+    #write to file
+    writeLines(thisText, fileName)
+    close(fileName)
+  }
+}
+```
+
+
+# Run 3
+
+```{r}
+# Loop this run for the 8 participants and the 3 sessions
+for (this_id in id_list) { 
+  for (this_session in session_list) {
+    
+    #set info
+    this_run <- 3
+    
+    #set filename
+    fileName<-file(glue("P0{this_id}_S0{this_session}_run{this_run}.prt"))
+    
+    #select data for this run
+    session_code <- this_session-1
+    thisData <- d %>% filter(id==this_id & session==session_code & run2==this_run)
+    
+    #set some values
+    nothingWeight <- 1
+    rDiffTr1 <- thisData$conf[1]
+    rDiffTr2 <- thisData$conf[2]
+    rDiffTr3 <- thisData$conf[3]
+    rDiffTr4 <- thisData$conf[4]
+    rDiffTr5 <- thisData$conf[5]
+    rDiffTr6 <- thisData$conf[6]
+    rDiffTr7 <- thisData$conf[7]
+    rDiffTr8 <- thisData$conf[8]
+    rDiffTr9 <- thisData$conf[9]
+    
+    #compile the text
+    thisText <- glue("FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P0{this_id}_S0{this_session}_run{this_run}
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 {nothingWeight}
+  51   66 {nothingWeight}
+ 100  115 {nothingWeight}
+ 149  164 {nothingWeight}
+ 197  212 {nothingWeight}
+ 249  264 {nothingWeight}
+ 300  315 {nothingWeight}
+ 350  365 {nothingWeight}
+ 400  415 {nothingWeight}
+ 449  464 {nothingWeight}
+ 501  516 {nothingWeight}
+Color: 230 25 75
+
+task6
+5
+  17   32 {rDiffTr1}
+  67   82 {rDiffTr2}
+ 265  280 {rDiffTr6}
+ 366  381 {rDiffTr7}
+ 465  480 {rDiffTr9}
+Color: 234 209 93
+
+task9
+5
+ 116  131 {rDiffTr3}
+ 165  180 {rDiffTr4}
+ 213  228 {rDiffTr5}
+ 316  331 {nothingWeight}
+ 416  431 {rDiffTr8}
+Color: 82 210 115
+
+rating
+9
+  35   40 {nothingWeight}
+  84   89 {nothingWeight}
+ 134  139 {nothingWeight}
+ 182  187 {nothingWeight}
+ 232  237 {nothingWeight}
+ 283  288 {nothingWeight}
+ 385  390 {nothingWeight}
+ 433  438 {nothingWeight}
+ 484  489 {nothingWeight}
+Color: 220 220 220
+
+confidence
+9
+  43   48 {rDiffTr1}
+  92   97 {rDiffTr2}
+ 141  146 {rDiffTr3}
+ 189  194 {rDiffTr4}
+ 241  246 {rDiffTr5}
+ 292  297 {rDiffTr6}
+ 392  397 {rDiffTr7}
+ 441  446 {rDiffTr8}
+ 493  498 {rDiffTr9}
+Color: 150 150 150
+
+feedback
+10
+  49   50 {nothingWeight}
+  98   99 {nothingWeight}
+ 147  148 {nothingWeight}
+ 195  196 {nothingWeight}
+ 247  248 {nothingWeight}
+ 298  299 {nothingWeight}
+ 348  349 {nothingWeight}
+ 398  399 {nothingWeight}
+ 447  448 {nothingWeight}
+ 499  500 {nothingWeight}
+Color: 245 130 48
+
+ratingcatch
+1
+ 333  338 {nothingWeight}
+Color: 56 181 169
+
+confcatch
+1
+ 342  347 {nothingWeight}
+Color: 255 117 211")
+    
+    #write to file
+    writeLines(thisText, fileName)
+    close(fileName)
+  }
+}
+```
+
+# Run 4
+
+```{r}
+# Loop this run for the 8 participants and the 3 sessions
+for (this_id in id_list) { 
+  for (this_session in session_list) {
+    
+    #set info
+    this_run <- 4
+    
+    #set filename
+    fileName<-file(glue("P0{this_id}_S0{this_session}_run{this_run}.prt"))
+    
+    #select data for this run
+    session_code <- this_session-1
+    thisData <- d %>% filter(id==this_id & session==session_code & run2==this_run)
+    
+    #set some values
+    nothingWeight <- 1
+    rDiffTr1 <- thisData$conf[1]
+    rDiffTr2 <- thisData$conf[2]
+    rDiffTr3 <- thisData$conf[3]
+    rDiffTr4 <- thisData$conf[4]
+    rDiffTr5 <- thisData$conf[5]
+    rDiffTr6 <- thisData$conf[6]
+    rDiffTr7 <- thisData$conf[7]
+    rDiffTr8 <- thisData$conf[8]
+    rDiffTr9 <- thisData$conf[9]
+    
+    #compile the text
+    thisText <- glue("FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P0{this_id}_S0{this_session}_run{this_run}
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 {nothingWeight}
+  50   65 {nothingWeight}
+  98  113 {nothingWeight}
+ 148  163 {nothingWeight}
+ 200  215 {nothingWeight}
+ 251  266 {nothingWeight}
+ 299  314 {nothingWeight}
+ 350  365 {nothingWeight}
+ 399  414 {nothingWeight}
+ 449  464 {nothingWeight}
+ 499  514 {nothingWeight}
+Color: 230 25 75
+
+task6
+5
+  66   81 {nothingWeight}
+ 164  179 {rDiffTr3}
+ 267  282 {rDiffTr5}
+ 366  381 {rDiffTr7}
+ 415  430 {rDiffTr8}
+Color: 234 209 93
+
+task9
+5
+  17   32 {rDiffTr1}
+ 114  129 {rDiffTr2}
+ 216  231 {rDiffTr4}
+ 315  330 {rDiffTr6}
+ 465  480 {rDiffTr9}
+Color: 82 210 115
+
+rating
+9
+  34   39 {nothingWeight}
+ 133  138 {nothingWeight}
+ 183  188 {nothingWeight}
+ 234  239 {nothingWeight}
+ 284  289 {nothingWeight}
+ 333  338 {nothingWeight}
+ 383  388 {nothingWeight}
+ 433  438 {nothingWeight}
+ 484  489 {nothingWeight}
+Color: 220 220 220
+
+confidence
+9
+  42   47 {rDiffTr1}
+ 140  145 {rDiffTr2}
+ 192  197 {rDiffTr3}
+ 243  248 {rDiffTr4}
+ 291  296 {rDiffTr5}
+ 342  347 {rDiffTr6}
+ 391  396 {rDiffTr7}
+ 441  446 {rDiffTr8}
+ 491  496 {rDiffTr9}
+Color: 150 150 150
+
+feedback
+10
+  48   49 {nothingWeight}
+  96   97 {nothingWeight}
+ 146  147 {nothingWeight}
+ 198  199 {nothingWeight}
+ 249  250 {nothingWeight}
+ 297  298 {nothingWeight}
+ 348  349 {nothingWeight}
+ 397  398 {nothingWeight}
+ 447  448 {nothingWeight}
+ 497  498 {nothingWeight}
+Color: 245 130 48
+
+ratingcatch
+1
+  83   88 {nothingWeight}
+Color: 56 181 169
+
+confcatch
+1
+  90   95 {nothingWeight}
+Color: 255 117 211")
+    
+    #write to file
+    writeLines(thisText, fileName)
+    close(fileName)
+  }
+}
+```
+
+# Run 5
+
+```{r}
+# Loop this run for the 8 participants and the 3 sessions
+for (this_id in id_list) { 
+  for (this_session in session_list) {
+    
+    #set info
+    this_run <- 5
+    
+    #set filename
+    fileName<-file(glue("P0{this_id}_S0{this_session}_run{this_run}.prt"))
+    
+    #select data for this run
+    session_code <- this_session-1
+    thisData <- d %>% filter(id==this_id & session==session_code & run2==this_run)
+    
+    #set some values
+    nothingWeight <- 1
+    rDiffTr1 <- thisData$conf[1]
+    rDiffTr2 <- thisData$conf[2]
+    rDiffTr3 <- thisData$conf[3]
+    rDiffTr4 <- thisData$conf[4]
+    rDiffTr5 <- thisData$conf[5]
+    rDiffTr6 <- thisData$conf[6]
+    rDiffTr7 <- thisData$conf[7]
+    rDiffTr8 <- thisData$conf[8]
+    rDiffTr9 <- thisData$conf[9]
+    
+    #compile the text
+    thisText <- glue("FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P0{this_id}_S0{this_session}_run{this_run}
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 {nothingWeight}
+  49   64 {nothingWeight}
+ 100  115 {nothingWeight}
+ 149  164 {nothingWeight}
+ 200  215 {nothingWeight}
+ 251  266 {nothingWeight}
+ 300  315 {nothingWeight}
+ 349  364 {nothingWeight}
+ 399  414 {nothingWeight}
+ 451  466 {nothingWeight}
+ 500  515 {nothingWeight}
+Color: 230 25 75
+
+task6
+5
+  17   32 {rDiffTr1}
+  65   80 {rDiffTr2}
+ 267  282 {rDiffTr5}
+ 316  331 {rDiffTr6}
+ 365  380 {rDiffTr7}
+Color: 234 209 93
+
+task9
+5
+ 116  131 {nothingWeight}
+ 165  180 {rDiffTr3}
+ 216  231 {rDiffTr4}
+ 415  430 {rDiffTr8}
+ 467  482 {rDiffTr9}
+Color: 82 210 115
+
+rating
+9
+  34   39 {nothingWeight}
+  83   88 {nothingWeight}
+ 183  188 {nothingWeight}
+ 235  240 {nothingWeight}
+ 285  290 {nothingWeight}
+ 333  338 {nothingWeight}
+ 384  389 {nothingWeight}
+ 434  439 {nothingWeight}
+ 484  489 {nothingWeight}
+Color: 220 220 220
+
+confidence
+9
+  41   46 {rDiffTr1}
+  92   97 {rDiffTr2}
+ 192  197 {rDiffTr3}
+ 243  248 {rDiffTr4}
+ 292  297 {rDiffTr5}
+ 341  346 {rDiffTr6}
+ 391  396 {rDiffTr7}
+ 443  448 {rDiffTr8}
+ 492  497 {rDiffTr9}
+Color: 150 150 150
+
+feedback
+10
+  47   48 {nothingWeight}
+  98   99 {nothingWeight}
+ 147  148 {nothingWeight}
+ 198  199 {nothingWeight}
+ 249  250 {nothingWeight}
+ 298  299 {nothingWeight}
+ 347  348 {nothingWeight}
+ 397  398 {nothingWeight}
+ 449  450 {nothingWeight}
+ 498  499 {nothingWeight}
+Color: 245 130 48
+
+ratingcatch
+1
+ 134  139 {nothingWeight}
+Color: 56 181 169
+
+confcatch
+1
+ 141  146 {nothingWeight}
+Color: 255 117 211")
+    
+    #write to file
+    writeLines(thisText, fileName)
+    close(fileName)
+  }
+}
+```
+
+# Run 6
+
+```{r}
+# Loop this run for the 8 participants and the 3 sessions
+for (this_id in id_list) { 
+  for (this_session in session_list) {
+    
+    #set info
+    this_run <- 6
+    
+    #set filename
+    fileName<-file(glue("P0{this_id}_S0{this_session}_run{this_run}.prt"))
+    
+    #select data for this run
+    session_code <- this_session-1
+    thisData <- d %>% filter(id==this_id & session==session_code & run2==this_run)
+    
+    #set some values
+    nothingWeight <- 1
+    rDiffTr1 <- thisData$conf[1]
+    rDiffTr2 <- thisData$conf[2]
+    rDiffTr3 <- thisData$conf[3]
+    rDiffTr4 <- thisData$conf[4]
+    rDiffTr5 <- thisData$conf[5]
+    rDiffTr6 <- thisData$conf[6]
+    rDiffTr7 <- thisData$conf[7]
+    rDiffTr8 <- thisData$conf[8]
+    rDiffTr9 <- thisData$conf[9]
+    
+    #compile the text
+    thisText <- glue("FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P0{this_id}_S0{this_session}_run{this_run}
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 {nothingWeight}
+  52   67 {nothingWeight}
+ 104  119 {nothingWeight}
+ 153  168 {nothingWeight}
+ 202  217 {nothingWeight}
+ 251  266 {nothingWeight}
+ 301  316 {nothingWeight}
+ 350  365 {nothingWeight}
+ 402  417 {nothingWeight}
+ 450  465 {nothingWeight}
+ 500  515 {nothingWeight}
+Color: 230 25 75
+
+task6
+5
+ 120  135 {rDiffTr3}
+ 169  184 {rDiffTr4}
+ 218  233 {nothingWeight}
+ 267  282 {rDiffTr5}
+ 466  481 {rDiffTr9}
+Color: 234 209 93
+
+task9
+5
+  17   32 {rDiffTr1}
+  68   83 {rDiffTr2}
+ 317  332 {rDiffTr6}
+ 366  381 {rDiffTr7}
+ 418  433 {rDiffTr8}
+Color: 82 210 115
+
+rating
+9
+  35   40 {nothingWeight}
+  87   92 {nothingWeight}
+ 137  142 {nothingWeight}
+ 187  192 {nothingWeight}
+ 285  290 {nothingWeight}
+ 334  339 {nothingWeight}
+ 385  390 {nothingWeight}
+ 435  440 {nothingWeight}
+ 485  490 {nothingWeight}
+Color: 220 220 220
+
+confidence
+9
+  44   49 {rDiffTr1}
+  96  101 {rDiffTr2}
+ 145  150 {rDiffTr3}
+ 194  199 {rDiffTr4}
+ 293  298 {rDiffTr5}
+ 342  347 {rDiffTr6}
+ 394  399 {rDiffTr7}
+ 442  447 {rDiffTr8}
+ 492  497 {rDiffTr9}
+Color: 150 150 150
+
+feedback
+10
+  50   51 {nothingWeight}
+ 102  103 {nothingWeight}
+ 151  152 {nothingWeight}
+ 200  201 {nothingWeight}
+ 249  250 {nothingWeight}
+ 299  300 {nothingWeight}
+ 348  349 {nothingWeight}
+ 400  401 {nothingWeight}
+ 448  449 {nothingWeight}
+ 498  499 {nothingWeight}
+Color: 245 130 48
+
+ratingcatch
+1
+ 235  240 {nothingWeight}
+Color: 56 181 169
+
+confcatch
+1
+ 243  248 {nothingWeight}
+Color: 255 117 211")
+    
+    #write to file
+    writeLines(thisText, fileName)
+    close(fileName)
+  }
+}
+```
+
+
+

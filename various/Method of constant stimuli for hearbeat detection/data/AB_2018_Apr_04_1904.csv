@@ -1,0 +1,7 @@
+participant,session,expName,date,TrialNumber,interval,ran,order,resp
+AB,000,MCS,2018_Apr_04_1904,1,0,1.0,0.0,['n']
+AB,000,MCS,2018_Apr_04_1904,2,500,1.0,1.0,['n']
+AB,000,MCS,2018_Apr_04_1904,3,400,1.0,2.0,['n']
+AB,000,MCS,2018_Apr_04_1904,4,100,1.0,3.0,['n']
+AB,000,MCS,2018_Apr_04_1904,5,300,1.0,4.0,['n']
+AB,000,MCS,2018_Apr_04_1904,6,200,1.0,5.0,['n']

@@ -1,0 +1,1679 @@
+---
+author: "Santiago Muñoz Moldes"
+title: "fMRI PSC analysis"
+---
+
+```{r, include=F}
+library(tidyverse)
+```
+
+## Data preparation
+
+### Download data
+
+We use read_csv from *readr* (tidyverse library), instead of read.csv. It will import the dataframe as a tibble, and with better defaults.
+
+Important: check that .csv file is separated by commas (',' and not ';'), and that decimals are indicated by dots ('.' and not ','). If separated by ';', use 'read_csv2()'.
+What I did is open the original .xls files, save to .csv. Then with TextEdit, replace commas ',' by dots '.', and then replace ';' by ','.
+
+```{r}
+raw1 <- read_csv("https://www.dropbox.com/s/qsufyabzyp2ahix/MeanTimeCoursesOfROIs.csv?dl=1", col_names = TRUE)
+```
+
+Add some new participants that are in separate datafiles
+
+```{r}
+raw2 <-read_csv("https://www.dropbox.com/s/e1c1puslgl1ric2/MeanTimeCoursesOfROIs_P09.csv?dl=1", col_names = TRUE)
+raw3 <-read_csv("https://www.dropbox.com/s/ilpcpu1e5jlglrg/MeanTimeCoursesOfROIs_P10-P11.csv?dl=1", col_names = TRUE)
+raw <- cbind(raw1,raw2,raw3)
+```
+
+We will first add the row number as a new column. This number indicates the *volume* number in our fMRI data. I use the function `rownames_to_column()`.
+
+```{r}
+df <- raw %>% rownames_to_column("volume")
+df$volume <- as.numeric(as.character(df$volume))
+```
+
+### Reshape data
+
+The dataset is in the wide format, and I want to convert it to the long fornat. First, let's use the 'gather()' function to move column names into a **key** column (named "info"), gathering the fMRI values into a single **value** column.
+
+```{r}
+df <- gather(df, key = "info" , value = "value", -volume)
+```
+
+Our key column still contain information from multiple variables (participant number, session number, run number) together, that we would like to separate. For that, we will use the `separate()` function, which will spread the text strings of the key onto different columns.
+
+```{r}
+df <- separate(df, col = "info", sep = "_", remove=TRUE, into=c("id","session","run"))
+```
+
+We now end up with text in the cells (e.g. "P01"). We will remove the text characters to leave only the digits, using `gsub` and `apply`.
+
+```{r}
+df[, 2:4] <- apply(df[, 2:4], 2, function(x) as.numeric(gsub("[^0-9.-]", "", x)))
+```
+
+```{r}
+tail(df)
+```
+
+In the next steps, I will add some missing protocol information.
+
+* The trial number. In run 0 (localizer), trial length is 8 volumes, and I remove the last rest block which we won't use. For runs 1 to 6, trial lengths are variable.
+* The condition corresponding to each volume, which is different for each run. For each run, the condition name is added in a new column **cond**.
+
+Volume numbers are manually copied from the corresponding .prt protocol files.
+
+We will treat each run separately, which will produce 6 separate dataframes. For each, I will create two new columns. The first, *cond*, will indicate the condition to which the volume pertains (e.g. rest, task6, task9, rating, confidence or feedback). The second, *blockStart*, indicates with a `1` the first volume of each block. This will be used later to add the trial numbers.
+
+```{r}
+run0 <- df %>%
+  filter(run==0) %>%
+  filter(volume<513) %>%  # excluding last rest block
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      33:48,
+      65:80,
+      97:112,
+      129:144,
+      161:176,
+      193:208,
+      225:240,
+      257:272,
+      289:304,
+      321:336,
+      353:368,
+      385:400,
+      417:432,
+      449:464,
+      481:496,
+      513:528) ~ "rest", 
+    volume  %in% c(
+      17:32,
+      81:96,
+      145:160,
+      209:224,
+      273:288,
+      337:352,
+      401:416,
+      465:480) ~ "draw",
+    volume  %in% c(
+      49:64,
+      113:128,
+      177:192,
+      241:256,
+      305:320,
+      369:384,
+      433:448,
+      497:512) ~ "tap"
+  )) %>%
+  mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      33,
+      65,
+      97,
+      129,
+      161,
+      193,
+      225,
+      257,
+      289,
+      321,
+      353,
+      385,
+      417,
+      449,
+      481,
+      513) ~ 1, 
+    volume  %in% c(
+      17,
+      81,
+      145,
+      209,
+      273,
+      337,
+      401,
+      465) ~ 1,
+    volume  %in% c(
+      49,
+      113,
+      177,
+      241,
+      305,
+      369,
+      433,
+      497) ~ 1
+  ))
+```
+
+```{r}
+run1 <- df %>%
+  filter(run==1) %>%
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      50:65,
+      100:115,
+      151:166,
+      199:214,
+      249:264,
+      300:315,
+      349:364,
+      398:413,
+      449:464,
+      500:515) ~ "rest", 
+    volume  %in% c(
+      17:32,
+      66:81,
+      167:182,
+      265:280,
+      316:331) ~ "task6",
+    volume  %in% c(
+      116:131,
+      215:230,
+      365:380,
+      414:429,
+      465:480) ~ "task9",
+    volume  %in% c(
+      35:40,
+      83:88,
+      134:139,
+      184:189,
+      234:239,
+      283:288,
+      333:338,
+      383:388,
+      433:438,
+      484:489) ~ "rating",
+    volume  %in% c(
+      42:47,
+      92:97,
+      143:148,
+      191:196,
+      241:246,
+      292:297,
+      341:346,
+      390:395,
+      441:446,
+      492:497) ~ "confidence",
+    volume  %in% c(
+      48:49,
+      98:99,
+      149:150,
+      197:198,
+      247:248,
+      298:299,
+      347:348,
+      396:397,
+      447:448,
+      498:499) ~ "feedback"
+  )) %>%
+  mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      50,
+      100,
+      151,
+      199,
+      249,
+      300,
+      349,
+      398,
+      449,
+      500) ~ 1, 
+    volume  %in% c(
+      17,
+      66,
+      167,
+      265,
+      316) ~ 1,
+    volume  %in% c(
+      116,
+      215,
+      365,
+      414,
+      465) ~ 1,
+    volume  %in% c(
+      35,
+      83,
+      134,
+      184,
+      234,
+      283,
+      333,
+      383,
+      433,
+      484) ~ 1,
+    volume  %in% c(
+      42,
+      92,
+      143,
+      191,
+      241,
+      292,
+      341,
+      390,
+      441,
+      492) ~ 1,
+    volume  %in% c(
+      48,
+      98,
+      149,
+      197,
+      247,
+      298,
+      347,
+      396,
+      447,
+      498) ~ 1
+  ))
+```
+
+```{r}
+run2 <- df %>%
+  filter(run==2) %>%
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      51:66,
+      101:116,
+      149:164,
+      200:215,
+      249:264,
+      300:315,
+      352:367,
+      400:415,
+      451:466,
+      500:515) ~ "rest", 
+    volume  %in% c(
+      17:32,
+      117:132,
+      216:231,
+      368:383,
+      467:482) ~ "task6",
+    volume  %in% c(
+      67:82,
+      165:180,
+      265:280,
+      316:331,
+      416:431) ~ "task9",
+    volume  %in% c(
+      35:40,
+      86:91,
+      134:139,
+      183:188,
+      233:238,
+      283:288,
+      335:340,
+      385:390,
+      435:440,
+      485:490) ~ "rating",
+    volume  %in% c(
+      43:48,
+      93:98,
+      141:146,
+      192:197,
+      241:246,
+      292:297,
+      344:349,
+      392:397,
+      443:448,
+      492:497) ~ "confidence",
+    volume  %in% c(
+      49:50,
+      99:100,
+      147:148,
+      198:199,
+      247:248,
+      298:299,
+      350:351,
+      398:399,
+      449:450,
+      498:499) ~ "feedback"
+  )) %>%
+  mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      51,
+      101,
+      149,
+      200,
+      249,
+      300,
+      352,
+      400,
+      451,
+      500) ~ 1, 
+    volume  %in% c(
+      17,
+      117,
+      216,
+      368,
+      467) ~ 1,
+    volume  %in% c(
+      67,
+      165,
+      265,
+      316,
+      416) ~ 1,
+    volume  %in% c(
+      35,
+      86,
+      134,
+      183,
+      233,
+      283,
+      335,
+      385,
+      435,
+      485) ~ 1,
+    volume  %in% c(
+      43,
+      93,
+      141,
+      192,
+      241,
+      292,
+      344,
+      392,
+      443,
+      492) ~ 1,
+    volume  %in% c(
+      49,
+      99,
+      147,
+      198,
+      247,
+      298,
+      350,
+      398,
+      449,
+      498) ~ 1
+  ))
+```
+
+
+```{r}
+run3 <- df %>%
+  filter(run==3) %>%
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      51:66,
+      100:115,
+      149:164,
+      197:212,
+      249:264,
+      300:315,
+      350:365,
+      400:415,
+      449:464,
+      501:516) ~ "rest", 
+    volume  %in% c(
+      17:32,
+      67:82,
+      265:280,
+      366:381,
+      465:480) ~ "task6",
+    volume  %in% c(
+      116:131,
+      165:180,
+      213:228,
+      316:331,
+      416:431) ~ "task9",
+    volume  %in% c(
+      35:40,
+      84:89,
+      134:139,
+      182:187,
+      232:237,
+      283:288,
+      333:338,
+      385:390,
+      433:438,
+      484:489) ~ "rating",
+    volume  %in% c(
+      43:48,
+      92:97,
+      141:146,
+      189:194,
+      241:246,
+      292:297,
+      342:347,
+      392:397,
+      441:446,
+      493:498) ~ "confidence",
+    volume  %in% c(
+      49:50,
+      98:99,
+      147:148,
+      195:196,
+      247:248,
+      298:299,
+      348:349,
+      398:399,
+      447:448,
+      499:500) ~ "feedback"
+  )) %>% mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      51,
+      100,
+      149,
+      197,
+      249,
+      300,
+      350,
+      400,
+      449,
+      501) ~ 1, 
+    volume  %in% c(
+      17,
+      67,
+      265,
+      366,
+      465) ~ 1,
+    volume  %in% c(
+      116,
+      165,
+      213,
+      316,
+      416) ~ 1,
+    volume  %in% c(
+      35,
+      84,
+      134,
+      182,
+      232,
+      283,
+      333,
+      385,
+      433,
+      484) ~ 1,
+    volume  %in% c(
+      43,
+      92,
+      141,
+      189,
+      241,
+      292,
+      342,
+      392,
+      441,
+      493) ~ 1,
+    volume  %in% c(
+      49,
+      98,
+      147,
+      195,
+      247,
+      298,
+      348,
+      398,
+      447,
+      499) ~ 1
+  ))
+```
+
+```{r}
+run4 <- df %>%
+  filter(run==4) %>%
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      50:65,
+      98:113,
+      148:163,
+      200:215,
+      251:266,
+      299:314,
+      350:365,
+      399:414,
+      449:464,
+      499:514) ~ "rest", 
+    volume  %in% c(
+      66:81,
+      164:179,
+      267:282,
+      366:381,
+      415:430) ~ "task6",
+    volume  %in% c(
+      17:32,
+      114:129,
+      216:231,
+      315:330,
+      465:480) ~ "task9",
+    volume  %in% c(
+      34:39,
+      83:88,
+      133:138,
+      183:188,
+      234:239,
+      284:289,
+      333:338,
+      383:388,
+      433:438,
+      484:489) ~ "rating",
+    volume  %in% c(
+      42:47,
+      90:95,
+      140:145,
+      192:197,
+      243:248,
+      291:296,
+      342:347,
+      391:396,
+      441:446,
+      491:496) ~ "confidence",
+    volume  %in% c(
+      48:49,
+      96:97,
+      146:147,
+      198:199,
+      249:250,
+      297:298,
+      348:349,
+      397:398,
+      447:448,
+      497:498) ~ "feedback"
+  )) %>%
+  mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      50,
+      98,
+      148,
+      200,
+      251,
+      299,
+      350,
+      399,
+      449,
+      499) ~ 1, 
+    volume  %in% c(
+      66,
+      164,
+      267,
+      366,
+      415) ~ 1,
+    volume  %in% c(
+      17,
+      114,
+      216,
+      315,
+      465) ~ 1,
+    volume  %in% c(
+      34,
+      83,
+      133,
+      183,
+      234,
+      284,
+      333,
+      383,
+      433,
+      484) ~ 1,
+    volume  %in% c(
+      42,
+      90,
+      140,
+      192,
+      243,
+      291,
+      342,
+      391,
+      441,
+      491) ~ 1,
+    volume  %in% c(
+      48,
+      96,
+      146,
+      198,
+      249,
+      297,
+      348,
+      397,
+      447,
+      497) ~ 1
+  ))
+```
+
+```{r}
+run5 <- df %>%
+  filter(run==5) %>%
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      49:64,
+      100:115,
+      149:164,
+      200:215,
+      251:266,
+      300:315,
+      349:364,
+      399:414,
+      451:466,
+      500:515) ~ "rest", 
+    volume  %in% c(
+      17:32,
+      65:80,
+      267:282,
+      316:331,
+      365:380) ~ "task6",
+    volume  %in% c(
+      116:131,
+      165:180,
+      216:231,
+      415:430,
+      467:482) ~ "task9",
+    volume  %in% c(
+      34:39,
+      83:88,
+      133:138,
+      183:188,
+      234:239,
+      284:289,
+      333:338,
+      383:388,
+      433:438,
+      484:489) ~ "rating",
+    volume  %in% c(
+      41:46,
+      92:97,
+      141:146,
+      192:197,
+      243:248,
+      292:297,
+      341:346,
+      391:396,
+      443:448,
+      492:497) ~ "confidence",
+    volume  %in% c(
+      47:48,
+      98:99,
+      147:148,
+      198:199,
+      249:250,
+      298:299,
+      347:348,
+      397:398,
+      449:450,
+      498:499) ~ "feedback"
+  )) %>%
+  mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      49,
+      100,
+      149,
+      200,
+      251,
+      300,
+      349,
+      399,
+      451,
+      500) ~ 1, 
+    volume  %in% c(
+      17,
+      65,
+      267,
+      316,
+      365) ~ 1,
+    volume  %in% c(
+      116,
+      165,
+      216,
+      415,
+      467) ~ 1,
+    volume  %in% c(
+      34,
+      83,
+      133,
+      183,
+      234,
+      284,
+      333,
+      383,
+      433,
+      484) ~ 1,
+    volume  %in% c(
+      41,
+      92,
+      141,
+      192,
+      243,
+      292,
+      341,
+      391,
+      443,
+      492) ~ 1,
+    volume  %in% c(
+      47,
+      98,
+      147,
+      198,
+      249,
+      298,
+      347,
+      397,
+      449,
+      498) ~ 1
+  ))
+```
+
+```{r}
+run6 <- df %>%
+  filter(run==6) %>%
+  mutate(cond = case_when(
+    volume %in% c(
+      1:16,
+      52:67,
+      104:119,
+      153:168,
+      202:217,
+      251:266,
+      301:316,
+      350:365,
+      402:417,
+      450:465,
+      500:515) ~ "rest", 
+    volume  %in% c(
+      120:135,
+      169:184,
+      218:233,
+      267:282,
+      466:481) ~ "task6",
+    volume  %in% c(
+      17:32,
+      68:83,
+      317:332,
+      366:381,
+      418:433) ~ "task9",
+    volume  %in% c(
+      35:40,
+      87:92,
+      137:142,
+      187:192,
+      235:240,
+      285:290,
+      334:339,
+      385:390,
+      435:440,
+      485:490) ~ "rating",
+    volume  %in% c(
+      44:49,
+      96:101,
+      145:150,
+      194:199,
+      243:248,
+      293:298,
+      342:347,
+      394:399,
+      442:447,
+      492:497) ~ "confidence",
+    volume  %in% c(
+      50:51,
+      102:103,
+      151:152,
+      200:201,
+      249:250,
+      299:300,
+      348:349,
+      400:401,
+      448:449,
+      498:499) ~ "feedback"
+  )) %>%
+  mutate(blockStart = case_when(
+    volume %in% c(
+      1,
+      52,
+      104,
+      153,
+      202,
+      251,
+      301,
+      350,
+      402,
+      450,
+      500) ~ 1, 
+    volume  %in% c(
+      120,
+      169,
+      218,
+      267,
+      466) ~ 1,
+    volume  %in% c(
+      17,
+      68,
+      317,
+      366,
+      418) ~ 1,
+    volume  %in% c(
+      35,
+      87,
+      137,
+      187,
+      235,
+      285,
+      334,
+      385,
+      435,
+      485) ~ 1,
+    volume  %in% c(
+      44,
+      96,
+      145,
+      194,
+      243,
+      293,
+      342,
+      394,
+      442,
+      492) ~ 1,
+    volume  %in% c(
+      50,
+      102,
+      151,
+      200,
+      249,
+      299,
+      348,
+      400,
+      448,
+      498) ~ 1
+  ))
+```
+
+### Patch runs together
+
+We can now add the different dataframes together again using `bind_rows()`. We can have a preview of the last rows using `tail()`.
+
+```{r}
+d <- bind_rows(run0,run1,run2,run3,run4,run5,run6)
+tail(d)
+```
+
+For the next step, I will add the trial number. Since each trial has different length, it cannot be done easily and I will use a somewhat complicated code.
+
+The loop will add a new column `trial` with the *trial number* to the dataset. This trial number counter starts over for each run. It will go row by row, and everytime a new run starts (as indicated by `volume = 1`), the counter starts at `1`. At every subsequent row, it will add the same number. When the loop reaches the row indicating start of a new trial (as indicated by `cond = "rest"` and `blockStart = 1`), the trial number counter is increased by 1.
+
+We do it separately for the localizer (run0) and for the rest of the runs (run 1 to 6).
+
+```{r}
+d$trial <- NA
+for(i in 1:nrow(d)) {
+  #pb$tick() # update progress bar
+  if(d$volume[i]==1){
+    # re-start counter for each id
+    idx <- 1
+    d$trial[i] <- idx
+  }else if(d$volume[i]>1){
+    if(d$cond[i]=="rest" & !is.na(d$blockStart[i])){
+      idx <- idx + 1
+      d$trial[i] <- idx
+    }else{
+      d$trial[i] <- idx
+    }
+  }
+}
+```
+
+3. In trial volume number (Vol number with respect to block)
+
+### We will separate by conditions, and patch together later.
+
+```{r}
+
+a <- d %>% filter(run>1)
+
+rest <- a %>% 
+  filter(cond=="rest") %>%
+  mutate(blockVol = rep((1:16), nrow(.)/16))
+task6 <- a %>% 
+  filter(cond=="task6") %>%
+  mutate(blockVol = rep((1:16), nrow(.)/16))
+task9 <- a %>% 
+  filter(cond=="task9") %>%
+  mutate(blockVol = rep((1:16), nrow(.)/16))
+rating <- a %>% 
+  filter(cond=="rating") %>%
+  mutate(blockVol = rep((1:6), nrow(.)/6))
+confidence <- a %>% 
+  filter(cond=="confidence") %>%
+  mutate(blockVol = rep((1:6), nrow(.)/6))
+feedback <- a %>% 
+  filter(cond=="feedback") %>%
+  mutate(blockVol = rep((1:2), nrow(.)/2))
+#jitter <- a %>% 
+#  filter(cond=="jitter")
+```
+
+Note that the above code chunk has removed NAs (jitter volumes).
+
+# Add some details to localizer run separately
+
+First, add trial number and blockVol to localizer runs.
+
+```{r}
+localizer <- d %>% filter(run==0)
+
+localizer <- localizer %>%
+  mutate(blockVol = rep((1:16), nrow(.)/16)) %>%
+  select(-blockStart)
+```
+
+### Patch conditions together and reorder
+
+But the above chunk has removed NA.
+
+```{r}
+final <- bind_rows(localizer,rest,task6,task9,rating,confidence,feedback) %>%
+  arrange(id,session,run,trial,volume)
+tail(final)
+```
+
+## Calculate baseline value for each trial
+
+```{r}
+# From the experimental script
+bv <- 13:16  # baseline volumes from rest block
+bdv <- 1:2   # baseline volumes inside drawing block
+dv <- 6:16   # drawing volumes 
+```
+
+Here I will create a new column with the baseline value used during the experiment to calculate the neurofeedback. I will do it in multiple steps. First, I specify which volumes are used inside the rest block to calculate the baseline (not all of them were used only the last 4 and the first two from the drawing period). This information is stored into the `blVol` column, which indicates `"yes"` if used for baseline, or `NA` if not.
+
+Then I group the data so that the mean will be calculated separately for this specific subset of volumes in each trial. I use `mutate()` to create the new variable, with `mean()` of the `value` column when the volumes have been defined (`blVol` indicates `"yes"`).
+
+I then I ungroup the data and remove some unnecessary columns.
+
+```{r}
+b <- final %>%
+  mutate(blVol = case_when((cond=="rest" & blockVol %in% bv | 
+                              cond=="task6" & blockVol %in% bdv |
+                              cond=="task9" & blockVol %in% bdv |
+                              cond=="draw" & blockVol %in% bdv |
+                              cond=="tap" & blockVol %in% bdv ) ~ "yes")) %>%
+  group_by(id,session,run,trial,blVol) %>%  # Calculate for specified "blVol" volumes
+  mutate(bl = mean(value[blVol=="yes"])) %>%  # Add new "bl" column
+  ungroup() %>%  # revert grouping
+  select(-blockStart, -blVol)  # remove unnecessary columns
+```
+
+Now, the baseline (`bl`) value appear in each row, and corresponds the mean from the chosen baseline volumes. I will now copy that mean to all rows of any given trial. In that way, I will be able to use them later to calculate the *psc* values. 
+
+I first group data by id, session, run and trial using `group_by`, and then use `mutate()` to copy the `bl` mean, by taking the `bl` value from the last volume of the rest block, but I could have taken any other. I then copy it to all rows from the trial.
+
+```{r}
+c <- b  %>%
+  group_by(id,session,run,trial) %>%
+  mutate(bl = bl[(cond=="rest" & blockVol == tail(bv, n=1))])
+```
+
+## Calculate psc
+
+We can now calculate the percent signal change, or `psc`, as the percent increase from baseline of any given volume of the trial.
+
+We use the following formula, which is the same as the one used during the experiment:
+
+`psc = (value-bl)/bl * 100`
+
+We obtain a new colum with the `psc`.
+
+```{r}
+e <- c  %>%
+  group_by(id,session,run,trial) %>%
+  mutate(psc = (value-bl)/bl * 100)
+```
+
+### Calculate Max_PSC in the localizer (run 0)
+
+We take the third quartile using `quantile()[4]` (OLD WAY)
+
+```{r eval=FALSE}
+f <- e %>%
+  # Calculate average psc of drawing, tapping and rest blocks 
+  group_by(id,session,run,cond) %>%
+  mutate(block_psc = mean(psc[run==0 & blockVol %in% dv])) %>%
+  ungroup() %>%
+  # Calculate the 3rd quantile of the average of drawing blocks during localizer
+  group_by(id,session) %>%
+  mutate(max_psc = quantile(block_psc[run==0 & cond == "draw"])[4]) %>%
+  ungroup() %>%
+  # copy to all trials from same session
+  group_by(id,session) %>%
+  mutate(max_psc = max_psc[(run=="0" & volume == 1)])  
+f
+```
+
+New way of calculating the Max PSC (to match Judith's code).
+Instead of averaging between trials, and then calculating the 3rd quartile, I calculate the 3rd quartile of all drawing volumes, without averaging them by trial first.
+
+```{r}
+f <- e %>%
+  # Calculate average psc of drawing volumes 
+  group_by(id,session,run) %>%
+  mutate(max_psc = quantile(psc[run==0 & cond == "draw" & blockVol %in% dv])[4]) %>%
+  # copy to all trials from same session
+  group_by(id,session) %>%
+  mutate(max_psc = max_psc[(run=="0" & volume == 1)])
+```
+
+### Calculate level 6 and level 9 for each participant
+
+For each participant and each session, we calculate the `level 6` and `level 9` as a proportion of their maximum PSC. Level 6 corresponds to 60% of the Max PSC, and level 9 to 90% of the Max PSC.
+
+```{r}
+
+f <- f %>%
+  group_by(id,session) %>%
+  mutate(max_l6 = (max_psc[(run=="0" & volume == 1)])*.6) %>%
+  mutate(max_l9 = (max_psc[(run=="0" & volume == 1)])*.9)
+```
+
+## Visualise
+
+### Theme settings
+
+Setup colors and labels for the plots. Level 6 is orange and level 9 is green, colors taken from the Dark2 palette.
+
+```{r}
+target.labels = c("60 %", "90 %")
+#target.colors <- c("task6" = "#D95F02", "task9" ="#1C9E77")
+target.colors <- c("task9" ="#1C9E77", "task6" = "#D95F02")
+```
+
+First plot. First visualisation using ggplot2 and `geom_smooth()`. This involves geom_smooth() using its own curve fitting formula, not defined manually, so beware.
+
+```{r}
+f %>%
+  filter(id>1)%>%
+  filter(cond=="task6" | cond=="task9") %>%
+  ggplot(aes(x=blockVol, y=psc, color=cond)) + 
+  geom_hline(aes(yintercept=max_psc), linetype="dashed", color = "black") +
+  geom_hline(aes(yintercept=max_l9), linetype="dashed", color = target.colors["task9"]) +
+  geom_hline(aes(yintercept=max_l6), linetype="dashed", color = target.colors["task6"]) +
+  #geom_path(aes(group = trial), alpha=.175) + 
+  geom_smooth(aes(group = cond)) +
+  facet_grid(session~id) + 
+  theme_bw() + theme(aspect.ratio = 1) +
+  labs(title = "Percent signal change (PSC) for the two levels of mental drawing",
+       subtitle = "Grid: ID (horizontal) - session (vertical)",
+       caption = "PSC is calculated as (val-bl)/bl*100. Baseline (bl) corresponds to volumes -4 to +2. \n Black line corresponds to Maximum PSC (3rd quartile) of mental drawing during the localizer run. \n Levels 6 and 9 are defined as 60% and 90% of the Max PSC.",
+       x = "Mental drawing volume", y = "PSC") +
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  NULL
+```
+
+### Summarise by volume
+
+We now do it again, but without relying on `geom_smooth()`. So first I will transform the data in a few ways:
+* I first group by `id`, `session` and volume (`blockVol`), and for each volume I compute a p-value from a paired t-test comparing `psc` from level 6 and level 9.
+* I then further group by condition (`cond`), and calculate the PSC *mean* and *standard error* for each volume. 
+* I also add to our new table the Max PSC, level 6 and level 9 values, which we will use for the plot.
+* Finally, I create a new column `sig` that contains only the **significant** mean psc values : only when the p-value is below 0.05, otherwise it contains a `NA`. This will allow to mark with `geom_point`the volumes where the difference between level 6 and level 9 is significant.
+
+```{r}
+
+nr_tests = 48  # correct for this number of tests
+FDR = 0.05  # the false discovery rate (a percentage, chosen by you).
+
+avg <- f %>% 
+  filter(run>0, id>1) %>%
+  filter(cond=="task6" | cond=="task9") %>%
+  mutate(cond=factor(cond)) %>%
+  group_by(id, session, blockVol) %>%
+  # ============================================================================
+  # Calculate one-tailed p-values at each timepoint
+  mutate(pval = t.test(psc[cond=="task9"], psc[cond=="task6"], alternative = "greater", paired =TRUE, data=.)$p.value) %>%
+  mutate(stat = t.test(psc[cond=="task9"], psc[cond=="task6"], alternative = "greater", paired =TRUE, data=.)$statistic) %>%
+  group_by(id, session, blockVol, cond) %>%
+  summarize(mean = mean(psc, na.rm = T), # mean
+            n = n(),
+            sd = sd(psc, na.rm = T),
+            se = sd(psc, na.rm = T) / sqrt(n()),  # standard error
+            ci = se * 1.96,  # standard error
+            max_psc = mean(max_psc),  # hline
+            max_l9 = mean(max_l9),  # hline
+            max_l6 = mean(max_l6),
+            pval = mean(pval),
+            stat = mean(stat)) %>%   # hline 
+  mutate(sig = case_when(pval<0.05 ~ mean))  %>% # create a variable with only the means only when t test significant
+  # ============================================================================
+  # Calculate the False Discovery Rate (FDR) with the Benjamini-Hochberg Procedure
+  arrange(id, cond, pval) %>% #Put the individual p-values in ascending order for each ID
+  group_by(id, cond) %>% # Assign rank by ID
+  mutate(rank = row_number()) %>%  #Assign ranks to the p-values (smallest = 1)
+  mutate(qval = (rank/nr_tests)*FDR)  %>% # Calculate each individual p-value’s Benjamini-Hochberg critical value, using the formula (i/m)Q, where:
+  mutate(qsig = case_when(pval<qval ~ mean)) %>%  #find max value that is smaller than qval
+  #mutate(first_sig_rank = max(rank[qsig>0])) %>% # get highest rank, and accept pvals below that rank
+  ungroup()
+```
+
+
+# Compare your original p-values to the critical B-H from and
+# find the largest p value that is smaller than the critical value.
+
+
+
+
+We can now plot the new transformed data. This new plot shows which volumes show a significant difference between levels. I use `geom_ribbon()` to draw color ribbons or ranges around the means of each conditions. I then use `geom_point()` once to draw the means, and a second time to draw in **black** the significant volumes.
+
+
+```{r, fig.width = 5, fig.height = 5}
+avg %>%
+  filter(id != 10) %>%
+  mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  mutate(cond = factor(cond, levels = c("task9","task6"), labels = c("90%", "60%"))) %>%
+  ggplot(aes(x=blockVol, y=mean)) + 
+  geom_hline(aes(yintercept=max_psc), linetype="dashed", color = "black", show.legend = TRUE) +
+  geom_hline(aes(yintercept=max_l9), linetype="dashed", color = target.colors["task9"], show.legend = TRUE) +
+  geom_hline(aes(yintercept=max_l6), linetype="dashed", color = target.colors["task6"], show.legend = TRUE) +
+  geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci, group=cond, fill=cond), alpha = .5) +
+  #geom_pointrange(aes(ymin=mean-se, ymax=mean+se, color=cond), size = .2) +
+  #geom_line(aes(y=mean+se, group=cond),linetype='dashed', size=.25) + #upper SE line
+  #geom_line(aes(y=mean-se, group=cond), linetype='dashed', size=.25) +#lower SE line
+  geom_point(aes(group=cond, color=cond), size=.75, shape = 1) +  # ALL POINTS
+  geom_point(aes(y=qsig, group=cond), size=.75, color="black", shape = 16) +  # SIGNIFICANT POINTS ONLY
+  theme_minimal() + 
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+  theme(aspect.ratio = 1.,
+            strip.text = element_text(size=14),
+          axis.text.y = element_text(size=12),
+          axis.text.x = element_text(size=10),
+          axis.title = element_text(size=14)
+  ) +
+  #scale_y_continuous(limits = c(-0.1,1.2), breaks = c(0,0.3,.6,.9), labels = c("0%", "30%", "60%", "90%")) +
+  facet_grid(session~id) + 
+  labs(#title = "Percent signal change (PSC) for the two levels of mental drawing",
+       subtitle = "Grid: Participant (horizontal) - Session (vertical)",
+       #caption = "Volume PSC is calculated as (val-bl)/bl*100, where bl (baseline) corresponds to volumes -4 to +2.\n Color ranges represent the standard error around the mean.\n #The  black line corresponds to Maximum PSC (3rd quartile) of mental drawing during a localizer run.\n Levels 6 and 9 are defined as 60% and 90% of the Max PSC.\n Black dots #indicate significant (α = 0.05) t-test p-values between the two levels.",
+       x = "Time (s)", y = "Percent signal change (PSC)",
+       fill = "Target\nLevel", color = "Target\nLevel") +
+  NULL
+```
+
+
+### Group average
+
+The mean psc per volume is first divided by the individual max_psc, and then averaged per session (across participants, runs, and trials).
+The significance is not shown yet.
+
+```{r dpi=1200}
+
+group <- f %>% 
+  filter(id != 10) %>%
+  filter(run>0, id>1) %>%
+  filter(cond=="task6" | cond=="task9") %>%
+  group_by(session, blockVol) %>%
+  # Calculate one-tailed p-values at each timepoint
+  mutate(pval = t.test(psc[cond=="task9"], psc[cond=="task6"], alternative = "greater", paired =TRUE, data=.)$p.value) %>%
+  mutate(stat = t.test(psc[cond=="task9"], psc[cond=="task6"], alternative = "greater", paired =TRUE, data=.)$statistic) %>%
+  group_by(session, blockVol, cond) %>%
+  summarize(mean = mean(psc/max_psc, na.rm = T), # mean
+            n = n(),
+            sd = sd(psc/max_psc, na.rm = T),
+            se = sd(psc/max_psc, na.rm = T) / sqrt(n()),  # standard error
+            ci = se * 1.96,  # standard error
+            max_psc = mean(max_psc),  # hline
+            max_l9 = mean(max_l9),  # hline
+            max_l6 = mean(max_l6),
+            pval = mean(pval),
+            stat = mean(stat)) %>%   # hline 
+  mutate(sig = case_when(pval<0.05 ~ mean))  %>% # create a variable with only the means only when t test significant
+  # ============================================================================
+  # Calculate the False Discovery Rate (FDR) with the Benjamini-Hochberg Procedure
+  arrange(cond, pval) %>% #Put the individual p-values in ascending order for each ID
+  group_by(cond) %>% # Assign rank by ID
+  mutate(rank = row_number()) %>%  #Assign ranks to the p-values (smallest = 1)
+  mutate(qval = (rank/nr_tests)*FDR)  %>% # Calculate each individual p-value’s Benjamini-Hochberg critical value, using the formula (i/m)Q, where:
+  mutate(qsig = case_when(pval<qval ~ mean)) %>%  #find max value that is smaller than qval
+  #mutate(first_sig_rank = max(rank[qsig>0])) %>% # get highest rank, and accept pvals below that rank
+  ungroup()
+
+group %>%
+  mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  mutate(cond = factor(cond, levels = c("task9","task6"), labels = c("90%", "60%"))) %>%
+  ggplot(aes(x=blockVol, y=mean)) + 
+  geom_hline(aes(yintercept=1), linetype="dashed", color = "black") +
+  geom_hline(aes(yintercept=.9), linetype="dashed", color = target.colors["task9"]) +
+  geom_hline(aes(yintercept=.6), linetype="dashed", color = target.colors["task6"]) +
+  geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci, group=cond, fill=cond), alpha = .5) +
+  geom_point(aes(group=cond, color=cond), size=1.75, shape = 1) +  # ALL POINTS
+  geom_point(aes(y=qsig, group=cond), size=1.75, color="black", shape = 16) +  # SIGNIFICANT POINTS ONLY
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_y_continuous(limits = c(-0.1,1.2), breaks = c(0,0.3,.6,.9), labels = c("0%", "30%", "60%", "90%")) +
+  scale_x_continuous(breaks = c(4,8,12,16)) +
+  facet_grid(.~session) + 
+  theme_minimal() +
+  theme(aspect.ratio = 1,
+        strip.text = element_text(size=14),
+          axis.text.y = element_text(size=12),
+          axis.text.x = element_text(size=10),
+          axis.title = element_text(size=14),
+        legend.position = "right") +
+  labs(#title = "Self-regulation performance",
+       #subtitle = "Grid: Day (1st, 2nd, 3rd)",
+       #caption = "Volume PSC is calculated as (val-bl)/bl*100, where bl (baseline) corresponds to volumes -4 to +2.\n Color ranges represent the standard error around the mean.\n The  black line corresponds to Maximum PSC (3rd quartile) of mental drawing during a localizer run.\n Levels 6 and 9 are defined as 60% and 90% of the Max PSC.\n Black dots indicate significant (α = 0.05) t-test p-values between the two levels.",
+       x = "Time (s)", y = "Self-regulation",
+       fill = "Target\nLevel", color = "Target\nLevel") +
+  NULL
+```
+
+
+```{r dpi=1200}
+
+loc <- f %>% 
+  ungroup() %>%
+    mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  filter(id>1, id != 10) %>%
+  filter(run==0) %>%
+  #filter(cond=="rest") %>%
+  group_by(session, blockVol, cond) %>%
+  summarize(mean = mean(psc, na.rm=T), #psc/max_psc,
+            #mean = mean(val, na.rm = T), # mean
+            n = n(),
+            sd = sd(mean, na.rm = T),
+            se = sd(mean, na.rm = T) / sqrt(n()),  # standard error
+            ci = se * 1.96,  # standard error
+            max_psc = mean(max_psc)) %>%   # hline 
+  ungroup()
+
+id_lines <- f %>%
+    ungroup() %>%
+    mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  filter(id>1, id != 10) %>%
+  filter(run==0) %>%
+  group_by(id, session, blockVol, cond) %>%
+  summarize(mean = mean(psc, na.rm=T))
+
+
+loc %>%
+  ggplot(aes(x=blockVol, y=mean)) + 
+  #geom_hline(aes(yintercept=1), linetype="dashed", color = "black") +
+  #geom_hline(aes(yintercept=.9), linetype="dashed", color = target.colors["task9"]) +
+  #geom_hline(aes(yintercept=.6), linetype="dashed", color = target.colors["task6"]) +
+  geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci), alpha = .5) +
+    geom_line(data=id_lines, aes(group=id), size=.4, color='grey') +  # ALL POINTS
+  geom_point(size=1.75, shape = 1) +  # ALL POINTS
+  geom_line(size=.5) +  # MAIN LINE
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+  #scale_y_continuous(limits = c(-0.1,1.2), breaks = c(0,0.3,.6,.9), labels = c("0%", "30%", "60%", "90%")) +
+ # scale_x_continuous(breaks = c(4,8,12,16)) +
+  facet_grid(session~cond) + 
+  theme_minimal() +
+  theme(aspect.ratio = .75,
+        strip.text = element_text(size=14),
+          axis.text.y = element_text(size=12),
+          axis.text.x = element_text(size=10),
+          axis.title = element_text(size=14),
+        legend.position = "right") +
+  labs(#title = "Self-regulation performance",
+       #subtitle = "Grid: Day (1st, 2nd, 3rd)",
+       #caption = "Volume PSC is calculated as (val-bl)/bl*100, where bl (baseline) corresponds to volumes -4 to +2.\n Color ranges represent the standard error around the mean.\n The  black line corresponds to Maximum PSC (3rd quartile) of mental drawing during a localizer run.\n Levels 6 and 9 are defined as 60% and 90% of the Max PSC.\n Black dots indicate significant (α = 0.05) t-test p-values between the two levels.",
+       x = "Time (s)", y = "Percent signal change (PSC)",
+       fill = "Target\nLevel", color = "Target\nLevel") +
+  NULL
+```
+
+```{r dpi=2400 fig.retina=10}
+
+loc <- f %>% 
+  ungroup() %>%
+  mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  filter(id>1, id != 10) %>%
+  filter(run==0) %>%
+ mutate(sel = case_when((cond=="rest" & blockVol %in% bv) ~ "yes",
+                        (cond=="draw" & blockVol %in% 1:16) ~ "yes")) %>%
+  filter(sel=="yes") %>%
+  mutate(blockVol2 = case_when(cond=="rest" ~ blockVol, 
+                               cond=="draw" ~ as.integer(blockVol+16))) %>%
+mutate(blockVol2 = blockVol2 - 16)
+
+loc_group <- loc %>%
+  group_by(session, blockVol2, cond) %>%
+  summarize(mean = mean(psc, na.rm=T), #psc/max_psc,
+            #mean = mean(val, na.rm = T), # mean
+            n = n(),
+            sd = sd(mean, na.rm = T),
+            se = sd(mean, na.rm = T) / sqrt(n()),  # standard error
+            ci = se * 1.96,  # standard error
+            max_psc = mean(max_psc)) %>%   # hline 
+  ungroup()
+
+loc_id_lines <- loc %>%
+  group_by(id, session, blockVol2, cond) %>%
+  summarize(mean = mean(psc, na.rm=T))
+
+
+loc_group %>%
+  ggplot(aes(x=blockVol2, y=mean)) + 
+  geom_vline(aes(xintercept=0), linetype="dashed", color = "black", size=.5) +
+  #geom_hline(aes(yintercept=1), linetype="dashed", color = "black") +
+  #geom_hline(aes(yintercept=.9), linetype="dashed", color = target.colors["task9"]) +
+  #geom_hline(aes(yintercept=.6), linetype="dashed", color = target.colors["task6"]) +
+  geom_ribbon(aes(ymin = mean-ci, ymax = mean+ci), alpha = .5) +
+    geom_line(data=loc_id_lines, aes(group=id), size=.4, color='grey') +  # ALL POINTS
+  geom_point(size=1.75, shape = 1) +  # ALL POINTS
+  geom_line(size=.5) +  # MAIN LINE
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+  #scale_y_continuous(limits = c(-0.1,1.2), breaks = c(0,0.3,.6,.9), labels = c("0%", "30%", "60%", "90%")) +
+  scale_x_continuous(breaks = c(-4,0,4,8,12,16)) +
+  facet_grid(.~session) + 
+  theme_minimal() +
+  theme(aspect.ratio = .75,
+        strip.text = element_text(size=14),
+          axis.text.y = element_text(size=12),
+          axis.text.x = element_text(size=10),
+          axis.title = element_text(size=14),
+        legend.position = "right") +
+  labs(#title = "Self-regulation performance",
+       #subtitle = "Grid: Day (1st, 2nd, 3rd)",
+       #caption = "Volume PSC is calculated as (val-bl)/bl*100, where bl (baseline) corresponds to volumes -4 to +2.\n Color ranges represent the standard error around the mean.\n The  black line corresponds to Maximum PSC (3rd quartile) of mental drawing during a localizer run.\n Levels 6 and 9 are defined as 60% and 90% of the Max PSC.\n Black dots indicate significant (α = 0.05) t-test p-values between the two levels.",
+       x = "Time (s)", y = "Percent signal change\n(PSC)",
+       fill = "Target\nLevel", color = "Target\nLevel") +
+  NULL
+```
+
+
+```{r dpi=1200}
+
+loc <- f %>% 
+  ungroup() %>%
+    mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  filter(id>1, id != 10) %>%
+  filter(run==0) %>%
+  filter(cond=="draw") %>%
+  group_by(blockVol, cond) %>%
+  summarize(mean = mean(psc, na.rm=T), #psc/max_psc,
+            #mean = mean(val, na.rm = T), # mean
+            n = n(),
+            sd = sd(mean, na.rm = T),
+            se = sd(mean, na.rm = T) / sqrt(n()),  # standard error
+            ci = se * 1.96,  # standard error
+            max_psc = mean(max_psc)) %>%   # hline 
+  ungroup()
+
+id_ribbon <- f %>%
+  ungroup() %>%
+  mutate(session = factor(session, levels = c(2,3,4), labels = c("Session 1", "Session 2", "Session 3"))) %>%
+  filter(id>1, id != 10) %>%
+  filter(run==0) %>%
+  filter(cond=="draw") %>%
+  group_by(id, session, blockVol) %>%
+  mutate(val = mean(psc, na.rm=T), n = n()) %>%
+  group_by(blockVol) %>%
+  summarise(mean = mean(val, na.rm=T),
+            sd = sd(val, na.rm = T),
+            se = sd(val, na.rm = T) / sqrt(n()),  # standard error
+            ci = se * 1.96) %>%  # standard error)   # hline 
+  ungroup()
+
+
+loc %>%
+  ggplot(aes(x=blockVol, y=mean)) + 
+  #geom_hline(aes(yintercept=1), linetype="dashed", color = "black") +
+  #geom_hline(aes(yintercept=.9), linetype="dashed", color = target.colors["task9"]) +
+  #geom_hline(aes(yintercept=.6), linetype="dashed", color = target.colors["task6"]) +
+  geom_ribbon(data=id_ribbon, aes(ymin = mean-ci, ymax = mean+ci), alpha = .5) +
+  geom_point(size=1.75) +  # ALL POINTS
+  geom_line(size=.75) +  # MAIN LINE
+  scale_color_manual(values =c("#1C9E77", "#D95F02")) +
+  scale_fill_manual(values =c("#1C9E77", "#D95F02")) +
+  #scale_y_continuous(limits = c(-0.1,1.2), breaks = c(0,0.3,.6,.9), labels = c("0%", "30%", "60%", "90%")) +
+ # scale_x_continuous(breaks = c(4,8,12,16)) +
+  theme_minimal() +
+  theme(aspect.ratio = 1,
+        strip.text = element_text(size=14),
+          axis.text.y = element_text(size=14),
+          axis.text.x = element_text(size=14),
+          axis.title = element_text(size=16),
+        legend.position = "right") +
+  labs(#title = "Self-regulation performance",
+       #subtitle = "Grid: Day (1st, 2nd, 3rd)",
+       #caption = "Volume PSC is calculated as (val-bl)/bl*100, where bl (baseline) corresponds to volumes -4 to +2.\n Color ranges represent the standard error around the mean.\n The  black line corresponds to Maximum PSC (3rd quartile) of mental drawing during a localizer run.\n Levels 6 and 9 are defined as 60% and 90% of the Max PSC.\n Black dots indicate significant (α = 0.05) t-test p-values between the two levels.",
+       x = "Time (s)", y = "Percent signal change (PSC)",
+       fill = "Target\nLevel", color = "Target\nLevel") +
+  NULL
+```
+
+
+
+Animated versions using `gganimate`.
+
+```{r animated-gif-1, include=FALSE}
+library(gganimate)  # https://github.com/thomasp85/gganimate
+library(gifski)
+library(png)
+
+g <- group %>%
+  ggplot(aes(x=blockVol, y=mean)) + 
+  geom_hline(aes(yintercept=1), linetype="dashed", color = "black") +
+  geom_hline(aes(yintercept=.9), linetype="dashed", color = target.colors["task9"]) +
+  geom_hline(aes(yintercept=.6), linetype="dashed", color = target.colors["task6"]) +
+  geom_ribbon(aes(ymin = mean-se, ymax = mean+se, group=cond, fill=cond), alpha = .5) +
+  geom_point(aes(group=cond, color=cond), size=.75, shape = 1) +  # ALL POINTS
+  #geom_point(aes(y=sig, group=cond), size=.75, color="black", shape = 16) +  # SIGNIFICANT POINTS ONLY
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  scale_fill_manual(labels=target.labels, values = target.colors) +
+  #scale_y_continuous(limits = c(0,4)) +
+  #facet_grid(.~session) + 
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  labs(title = "fMRI session: {frame_time}",
+       subtitle = "Self-regulation performance",
+       caption = "",
+       x = "Mental drawing volume", y = "Normalized PSC") +
+  NULL +
+  transition_time(session) + 
+  NULL 
+
+# SAVE FILES (TO TEMP DIRECTORY)
+#animate(g, nframes = 30, fps = 10, device="png", renderer = file_renderer(dir = dir, prefix = "gganim_plot", overwrite = FALSE))
+# SAVE GIF
+dir <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/NF-rating-private/behav-analysis/img"
+animate(g, nframes = 30, fps = 10, device="png", renderer = gifski_renderer("filename.gif"))
+# SAVE VIDEO (TO TEMP DIRECTORY)
+#animate(g, nframes = 180, fps = 30, device="png", renderer = ffmpeg_renderer(name = "video.mp4"))
+```
+
+* Variability within / between
+* Diff first / last volume of bl
+* Correlation rest improvements and performance improvements
+
+
+New animated graph
+
+```{r animated-gif-2, fig.width = 3.5, fig.height = 3, echo = FALSE}
+library(gganimate)  # https://gganimate.com/articles/gganimate.html
+library(gifski)
+
+g <- group %>%
+  ggplot(aes(x=blockVol, y=mean)) + 
+  geom_hline(aes(yintercept=1), linetype="dashed", color = "black") +
+  geom_hline(aes(yintercept=.9), linetype="dashed", color = target.colors["task9"]) +
+  geom_hline(aes(yintercept=.6), linetype="dashed", color = target.colors["task6"]) +
+  geom_ribbon(aes(ymin = mean-se, ymax = mean+se, group=cond, fill=cond), alpha = .5) +
+  geom_point(aes(group=cond, color=cond), size=.75, shape = 1) +  # ALL POINTS
+  #geom_point(aes(y=sig, group=cond), size=.75, color="black", shape = 16) +  # SIGNIFICANT POINTS ONLY
+  scale_color_manual(labels=target.labels, values = target.colors) +
+  scale_fill_manual(labels=target.labels, values = target.colors) +
+  #scale_y_continuous(limits = c(0,4)) +
+  #facet_grid(.~session) + 
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  labs(title = "Now showing session: {closest_state}",
+       subtitle = "Self-regulation performance",
+       caption = "",
+       x = "Mental drawing time (s)", y = "Normalized PSC",
+       color = 'Level', fill = 'Level') +
+  NULL +
+  # ANIMATION
+  transition_states(session, transition_length = 2, state_length = 1) +
+  ease_aes('cubic-in-out') + # # Slow start and end for a smoother look
+  NULL 
+g
+
+```
+
+### Rest block descriptives
+
+Create a new variable `bl_psc` representing  the baseline values, minus the value of the last volume. That way values are locked to the final value:
+
+`bl_psc = (value-last)/last * 100`
+
+I also create a new column `blockVol2` which gives new numbers to the baseline volumes, -6 to 0 instead of 13:16 + 1:2.
+
+I then creste a new table where the `bl_psc` values have been summarized by volume for each participant and session. In addition to the mean, the standard error has also been calculated.
+
+```{r, fig.width = 4, fig.height = 5}
+blines <- final %>%
+  mutate(blVol = case_when((cond=="rest" & blockVol %in% bv | 
+                              cond=="task6" & blockVol %in% bdv |
+                              cond=="task9" & blockVol %in% bdv |
+                              cond=="draw" & blockVol %in% bdv |
+                              cond=="tap" & blockVol %in% bdv ) ~ "yes")) %>%
+  group_by(id,session,run,trial) %>%
+  mutate(last = mean(value[(cond=="draw"|cond=="task6"|cond=="task9"|cond=="tap") & blockVol == tail(bdv, n=1)]) ) %>%
+  mutate (bl_psc = (value-last)/last*100) %>% 
+  mutate(blockVol2 = case_when(cond=="rest" & blockVol %in% bv ~ blockVol-18, 
+                               cond=="task6" & blockVol %in% bdv |
+                                 cond=="task9" & blockVol %in% bdv |
+                                 cond=="draw" & blockVol %in% bdv |
+                                 cond=="tap" & blockVol %in% bdv  ~ blockVol-2))
+
+blines_sum <- blines %>%
+  filter(run>0, id>1) %>%
+  filter(blockVol2 %in% c(-6:0)) %>%
+  group_by(id, session, blockVol2, blVol) %>%
+  summarize(mean = mean(bl_psc, na.rm = T), # mean
+            n = n(),
+            se = sd(bl_psc, na.rm = T) / sqrt(n()))
+```
+
+For visualisation, I choose to show the mean and standard error of the each PSC value from the baseline with respect to the last value of the baseline. This way, we can visualise how baseline variability differs in leading to the start of the drawing period.
+
+For calculating the mean and se, I used summarised data (by volume).
+
+```{r, fig.width = 4, fig.height = 5}
+blines_sum %>%
+  ggplot(aes(x=blockVol2, y=mean, group=factor(session))) +
+  geom_hline(aes(yintercept=0), linetype="dashed", color = "black") +
+  geom_ribbon(aes(ymin = mean-se, ymax = mean+se, fill=factor(session)), alpha = .5) +
+  geom_line() + 
+  geom_point(size=.75, shape = 1) +
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  facet_wrap(id~.) + 
+  labs(title = "Changes in baseline throughout training",
+       subtitle = "",
+       caption = "PSC is calculated as (val-bl)/bl*100, where baseline (bl) corresponds to the last volume [0].",
+       x = "Baseline volume", y = "PSC") +
+  NULL
+``` 
+
+Boxplots
+
+```{r, fig.width = 4, fig.height = 5}
+blines %>%
+  filter(run>0, id>1) %>%
+  filter(blockVol2 %in% c(-6:0)) %>%
+  group_by(id, session, blockVol2, blVol) %>%
+  ggplot(aes(x=factor(session), y=bl_psc, fill=factor(session))) +
+  geom_hline(aes(yintercept=0), linetype="dashed", color = "black") +
+  geom_boxplot() +
+  theme_bw() +
+  theme(aspect.ratio = 1) +
+  facet_wrap(id~.) + 
+  labs(title = "Changes in baseline throughout training",
+       subtitle = "",
+       caption = "PSC is calculated as (val-bl)/bl*100, where baseline (bl) corresponds to the last volume [0].",
+       x = "Baseline volume", y = "PSC") +
+    scale_y_continuous(limits = c(-1,1)) +
+  NULL
+``` 
+
+Rest block descriptives
+
+* Correlation rest changes and self-regulation improvements
+
+
+## To-Do
+
+1. Localizer analysis
+
+* Variability within trials
+* Comparison drawing vs tapping (if more tapping activity, better task performance?)
+
+
+## Possible new variables:
+- continuous trial number
+- continuous run number
+
+
+
+---April
+
+Goal 1: Get timecourse for every trial, with likelihoods and runnning averages
+
++ For each subject separately
+
++ For each trial:
+ + Take values of imagery
+    + Compute statistics: likelihood, probabilities each response, precision
+ + Compute prior (1---->nth)
+    + Compute statistics: likelihood, probabilities each response, precision
+
+```{r}
+# define grid for grid analysis
+responses <- seq.int(from=1, to=12, by=1)
+
+trial_data <- f %>% 
+  filter(run>0, id>1) %>%  # select neurofeedback runs, and participants
+  filter(blockVol>4) %>%  # CHECK THIS
+  filter(cond=="task6" | cond=="task9") %>%
+  mutate(psc_a = (psc/max_psc)*10) %>% #?add another step with outside range values 0-12
+  #group_by(id, session, run, trial, blockVol) %>%
+  group_by(id, session, run, trial) %>%
+  do(signal = pull(.))  # use pull to extract values as vector and save them in new column
+```
+
+Take signal values and get a likelihood distribution:
+
+```{r}
+
+trial_data %>%
+  #mutate_at(.vars=vars(signal), .funs=funs(MEAN=mean(.), STDEV=sd(.))) %>%
+  #do(lkl = dnorm(x=responses, mean=MEAN, sd=STDEV))
+  mutate_at(.vars=vars(signal), .funs= dnorm(x=responses, mean=mean(.), sd=sd(.)))
+
+
+# FOR EACH TRIAL:
+  #SELECT VECTOR VALUES
+  #USE DNORM FUNCTION TO OBTAIN PROBABILITIES
+  #SAVE PROBABILITIES FOR EACH RESPONSE AS VECTOR AGAIN
+  #SAVE PRECISION OF PROBABILITIES
+
+
+```
+
+Calculate likelihood and save as:
+Calculate probability of each response with grid analysis: (long, wide?)
+Calculate precision
+
+
+
+------
+Goal 2:
+
+Logistic regression?: difference in levels predicted by PSC at different volumes in different days?
+
+level ~ psc(-1:4) * volume(1:16) * session(1:3)

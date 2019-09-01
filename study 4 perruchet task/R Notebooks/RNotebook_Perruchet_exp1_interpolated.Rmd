@@ -1,0 +1,1245 @@
+---
+title: "R Analysis Notebook: Subjective and cardiac responses, Perruchet"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+library('tidyverse')  
+library('lmerTest')
+library('colorblindr')  # for colorblind proof color scales
+```
+
+Possible to-dos:
+* Need to normalise ratings for participants? Since changes can be relative 
+depending on their use of the scale? :  drifts visible in some
+* Stats
+* MM: further test model with no condition (especially for ECG)
+* Problem of data pooling: cannot interpret as relating to expectancy
+(cause we have data showing it can differ greatly for same "Level"!)
+
+* Clear problem in rel_bpm where some valus are >40, 50...
++
+
+# Load data
+
+```{r importing data, include=FALSE}
+
+#------- PSYCHOPY DATA
+# load all tables from PsychoPy containing the trial information and behavioural 
+# responses for each participant
+
+# folder containing individual datasets 
+psypy_path <- '/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/PC/exp_1/data/behavData/'
+
+# select specific files inside folder
+psypy_files = dir(path=psypy_path, patter='_2019_')
+
+# read each selected file and combine into a unique dataframe
+psypy_data <- psypy_files %>%
+  # using cols_only() to select only a subset of columns from the CSV file
+  map(~ read_csv(file.path(psypy_path, .), 
+                 col_types = cols_only(screen = "i", 
+                                       date = "c", 
+                                       expName = "c", 
+                                       sex = "c", 
+                                       age = "i", 
+                                       triggers = "c", 
+                                       participant = "i", 
+                                       TrialNumber = "i", 
+                                       trialType = "c", 
+                                       ran = "d", 
+                                       order = "d", 
+                                       rating = "d", 
+                                       rt = "d", 
+                                       pre_us= "d", 
+                                       iti= "d"))) %>%
+  reduce(rbind) %>%    # reduce with rbind into one dataframe
+  transmute(           # keep only some columns, and change some column names
+    id = participant,
+    trial = TrialNumber,
+    condition = trialType,
+    rating = rating,
+    rt = rt)
+
+#------- ECG DATA
+# load all tables that are obtained from Matlab's R peak detection script
+
+# folder containing individual datasets 
+ecg_path <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/PC/exp_1/analysis/preprocessed/CS/interpolated/"
+
+# select specific files inside folder
+ecg_files = dir(path=ecg_path, patter='ecg_interp_P')
+
+# read each selected file and combine into a unique dataframe
+ecg_data <- ecg_files %>%
+  # read in all the files, appending the path before the filename
+  map(~ read_csv(file.path(ecg_path, .),  # the function read_csv() from the readr package
+                 col_names = c("id", "trial", "trigger", "-5", "-4.5", "-4", "-3.5", "-3", "-2.5", "-2", "-1.5", "-1", "-0.5", "0", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5", "8", "8.5", "9"),
+                 col_types = cols("i", "i", "i", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d", "d"),
+                 na = c("NaN"))) %>%
+  reduce(rbind)        # reduce with rbind into one dataframe
+
+
+#------- ECG REST DATA
+# Median and SD of a 3-minute rest period prior to starting the main task
+
+ecg_rest_path <- "/Users/santiago/Dropbox/MyScience/MyPhD/MyPhD-projects/PC/exp_1/analysis/preprocessed/rest"
+rest_file <- 'ecg_BPM_20190520T144809.csv'
+
+#rest_data <- read_csv(file.path(ecg_rest_path, rest_file),
+#                 col_names = c("id", "med_rest", "sd_rest"), 
+#                 col_types = cols("i", "d", "d"), 
+#                 na = c("NaN")) 
+```
+
+# Data wrangling 
+
+## Create cumulative score
+
+Add a counter for each consecutive occurence of condition type
+
+Solution from here: https://stackoverflow.com/questions/54581440/r-count-consecutive-occurrences-of-values-in-a-single-column-and-by-group
+
+Since we are interested in having the *run length* and *type* of 
+**the previous trial**, we will shift these values in our
+table using the lag() function from dyplr. This causes that we lose the first
+trial of every participant (there's not preceding trial).
+
+We also remove missing responses (non-clicks, limit was 10s).
+
+
+```{r}
+ratings <- psypy_data %>%
+  group_by(id, grp = {grp = rle(condition); rep(seq_along(grp$lengths), grp$lengths)}) %>%
+  mutate(count = seq_along(condition)) %>%
+  ungroup() #%>%
+  #select(-grp) # remove this column 
+
+ratings_long <- ratings %>%
+  group_by(id) %>%
+  mutate(count_lag = lag(count)) %>%
+  mutate(cond_lag = lag(condition)) %>%
+  ungroup() %>%
+  drop_na()  # We remove trials with missing information
+```
+
+
+After removing `NA`, `ratings_long` has 4783 trials.
+
+## Create ordering for graphs
+
+Typically, Perruchet effect graphs are shown as:
+
+|   CS    |    US   |
+|:-------:|:-------:|
+| 4 3 2 1 | 1 2 3 4 |
+
+I will create a new variable to obtain this ordering easily
+
+|   CS    |    US   |
+|:-------:|:-------:|
+| 1 2 3 4 | 5 6 7 8 |
+
+```{r}
+ratings_long <- ratings_long %>%
+  mutate(graph_order = case_when((cond_lag=='CS' & count_lag==1) ~ 4,
+                                 (cond_lag=='CS' & count_lag==2) ~ 3,
+                                 (cond_lag=='CS' & count_lag==3) ~ 2,
+                                 (cond_lag=='CS' & count_lag==4) ~ 1,
+                                 cond_lag=='CS-US' ~ count_lag+4),
+         pooled_order = case_when((cond_lag=='CS' & count_lag==1) ~ 4,
+                                  (cond_lag=='CS' & count_lag==2) ~ 3,
+                                  (cond_lag=='CS' & count_lag==3) ~ 2,
+                                  (cond_lag=='CS' & count_lag==4) ~ 1,
+                                  cond_lag=='CS-US' ~ count_lag+0))
+```
+
+## Expectancy ratings
+
+### Plot the exptencacy ratings
+
+Using the long format data (all datapoints are included, mean and CI calculated with bootstrap https://www.rdocumentation.org/packages/Hmisc/versions/4.2-0/topics/smean.sd)
+
+```{r}
+ratings_long %>%
+  ggplot(aes(y=rating, x = factor(graph_order), group=cond_lag, color=cond_lag)) + # Remove group to have continuous line
+    geom_hline(yintercept=50, linetype="dashed") +
+    geom_jitter(aes(group=factor(graph_order)), alpha=.075) + # color=NULL
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size = 1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    theme_linedraw() +
+    theme(aspect.ratio = 1,
+          legend.position = c(0.225, 0.2),
+          legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    scale_y_continuous(limits = c(0, 100)) +  # show all possible values of rating 
+    scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_x_discrete(labels=c("1" = "4", 
+                              "2" = "3", 
+                              "3" = "2", 
+                              "4" = "1", 
+                              "5" = "1", 
+                              "6" = "2", 
+                              "7" = "3", 
+                              "8" = "4")) +
+    labs(title = "Expectancy rating",
+       subtitle = "Participants reported in every trial the extent to
+which they expected the loud noise on the next trial",
+       caption = "A run is a sequence of consecutive trials of the same type", 
+       x = "Length of Preceding Run", y = "Rating", 
+       color = 'Type of \nPreceding Run') +
+    NULL
+```
+
+# Individual ratings
+
+Individual ratings as a function of trial
+
+```{r fig.height=5}
+ratings_long %>%
+  ggplot(aes(y=rating, x = trial)) +
+    geom_line() +
+    facet_wrap(.~id)
+```
+
+### Different kind of plot
+
+To have more control on the data that is shown, I will now make a similar graph
+where the averages are calculate *manually*.
+I will calcualte individual averages and standard errors for each participant individually.
+The plot will then show the within-subject standard error. 
+
+```{r}
+ratings_id_summary <- ratings_long %>%
+  group_by(id, cond_lag, count_lag, graph_order) %>%
+  summarize(val = mean(rating, na.rm = T),
+            sd  = sd(rating, na.rm = T),
+            se  = sd(rating, na.rm = T)/n(),
+            ci  = 1.96*se)  %>% # 95% confidence interval
+  group_by(cond_lag, count_lag) %>% 
+  mutate(group_val = mean(val), group_se = mean(se), group_ci = mean(ci))
+```
+
+
+```{r}
+ratings_id_summary %>%
+  ggplot(aes(y=group_val, x = factor(graph_order), group=cond_lag, color=cond_lag)) + # Remove group to have continuous line
+    geom_hline(yintercept=50, linetype="dashed") +
+    #geom_violin(aes(y=val, group=factor(graph_order), fill=cond_lag, color=NA), alpha=.4) +
+    geom_jitter(aes(y=val, group=interaction(id, factor(graph_order)), color=cond_lag), alpha=.25, width=.1, height=.05) + # color=NULL
+    geom_point(aes(y=group_val), size = 3.) +
+    geom_ribbon(aes(ymin = group_val-group_se, ymax = group_val+group_se, fill=cond_lag, color=NULL), alpha = .4) +
+    geom_line(aes(group=cond_lag)) +
+    theme_linedraw() +
+    theme(aspect.ratio = 1,
+          legend.position = c(0.225, 0.2),
+          legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    scale_y_continuous(limits = c(0, 100)) +  # show all possible values of rating 
+    scale_color_OkabeIto(labels=c("E1-alone", "E1-E2 pair")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("E1-alone", "E1-E2 pair")) +
+    #scale_color_viridis(labels=c("CS only", "CS and US"), discrete=T, option='cividis') +  # requires library(colorblindr)
+    #scale_fill_viridis(labels=c("CS only", "CS and US"), discrete=T, option='cividis') +  # requires library(colorblindr)
+
+    scale_x_discrete(labels=c("1" = "4", 
+                              "2" = "3", 
+                              "3" = "2", 
+                              "4" = "1", 
+                              "5" = "1", 
+                              "6" = "2", 
+                              "7" = "3", 
+                              "8" = "4")) +
+    labs(
+      #title = "Expectancy rating",
+      #subtitle = "Participants reported in every trial the extent to
+#which they expected the loud noise on the next trial",
+       #caption = " Each dot represents the average of one individual.", 
+       x = "Length of Preceding Run", y = "Rating (0 - 100 %)", 
+       color = 'Type of \nPreceding Run', fill = 'Type of \nPreceding Run') +
+    NULL
+```
+
+
+### Pool together the two conditions
+
+Combine together the different types of runs.
+
+For CS only trials, 
+Length of 4 becomes Level 1
+Length of 3 becomes Level 2
+Length of 2 becomes Level 3
+Length of 1 becomes Level 4
+
+```{r}
+ratings_id_summary_pooled <- ratings_long %>%
+  group_by(id, cond_lag, pooled_order) %>%
+  summarize(val = mean(rating, na.rm = T),
+            sd  = sd(rating, na.rm = T),
+            se  = sd(rating, na.rm = T)/n(),
+            ci  = 1.96*se)  %>% # 95% confidence interval
+  group_by(cond_lag, pooled_order) %>% 
+  mutate(group_val = mean(val), 
+         group_se = mean(se), 
+         group_ci = mean(ci))
+```
+
+
+```{r}
+ratings_id_summary_pooled %>%
+  ggplot(aes(y=group_val, x = factor(pooled_order), group=cond_lag, color=cond_lag)) + # Remove group to have continuous line
+    geom_hline(yintercept=50, linetype="dashed") +
+    geom_jitter(aes(y=val, group=interaction(id, factor(pooled_order))), alpha=.25, width=.1, height=.05) + # color=NULL
+    geom_point(aes(y=group_val), size = 3.) +
+    geom_ribbon(aes(ymin = group_val-group_ci, ymax = group_val+group_ci, fill=cond_lag, color=NULL), alpha = .4) +
+    geom_line(aes(group=cond_lag)) +
+    theme_linedraw() +
+    theme(aspect.ratio = 1,
+          #legend.position = c(0.225, 0.2),
+          legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    scale_y_continuous(limits = c(0, 100)) +  # show all possible values of rating 
+    scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("CS only", "CS and US")) +
+    scale_x_discrete(labels=c("1" = "Level 1", 
+                              "2" = "Level 2", 
+                              "3" = "Level 3", 
+                              "4" = "Level 4")) +
+    labs(title = "Expectancy rating",
+       subtitle = "Participants reported in every trial the extent to
+which they expected the loud noise on the next trial",
+       caption = "A run is a sequence of consecutive trials of the same type. 
+Each dot represents the average of one individual. 
+The shaded area represents the 95 % CI around the mean.", 
+       x = "Length of Preceding Run", y = "Rating", 
+       color = 'Type of \nPreceding Run', fill = 'Type of \nPreceding Run') +
+    NULL
+```
+
+
+
+## Mixed Model on trial data
+
+We go back to the full dataset with trial-by-trial ratings.
+
+We fit a Mixed Model that allows for random intercepts (allowed to be different 
+for each subject) and random slopes for each condition coefficient (also allowed 
+to vary for each subject).
+
+### Mixed Model Comparison
+
+```{r}
+
+# Intercept only model
+ratings_long %>%
+  lmer(rating ~ (1|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit0 }
+
+# Flat model
+
+ratings_long %>%
+  lmer(rating ~ cond_lag + (1+cond_lag|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa",
+                                 optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit1 }
+
+# With run length
+
+ratings_long %>%
+  lmer(rating ~ cond_lag + pooled_order + (1 + cond_lag + pooled_order|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa",
+                                 optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit2 } 
+
+
+# With interaction
+
+#ratings_long %>%
+#  lmer(rating ~ cond_lag * pooled_order + (1 + cond_lag * pooled_order|id), 
+#       data=., 
+#       REML=F, 
+#       control=lmerControl(optimizer="bobyqa",
+#                                 optCtrl=list(maxfun=2e5))) %>%
+#  {. ->> mm_fit3 } 
+
+
+anova(mm_fit0, mm_fit1, mm_fit2)
+
+```
+
+Lower AIC suggests better model. Full model is the best.
+
+
+```{r}
+# model with interaction is better, but the interaction in that model is not sig
+summary(mm_fit2)
+```
+
+
+#### Plot the fit from the Mixed Model
+
+On top of the actual data. 
+Consider showing the predicted values, or the average per ID data.
+
+```{r}
+ratings_long_fit <- ratings_long %>% 
+  drop_na() %>%
+  mutate(model_pred = predict(mm_fit2))
+
+# slightly different fit that predict()...
+#ratings_long_fit <- cbind(ratings_long, predictInterval(mm_fit3, ratings_long))
+```
+
+```{r}
+ratings_long_fit %>%
+  ggplot(aes(y=model_pred, x = factor(pooled_order), group=cond_lag)) + # Remove group to have continuous line
+    geom_hline(yintercept=50, linetype="dashed") +
+    geom_violin(aes(y=rating, group=factor(graph_order), fill=cond_lag, color=NA), alpha=.5) +
+    #geom_jitter(aes(y=rating, group=factor(pooled_order), color=cond_lag), alpha=.1 ) + # color=NULL
+    #geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = .5) +
+    #geom_smooth(method='lm', size=1, se=T, linetype="dashed") +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size = 1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    theme_linedraw() +
+    theme(aspect.ratio = 1,
+          #legend.position = c(0.225, 0.2),
+          legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    scale_y_continuous(limits = c(0, 100)) +  # show all possible values of rating 
+    scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("CS only", "CS and US")) + 
+    scale_x_discrete(labels=c("1" = "Level 1", 
+                              "2" = "Level 2", 
+                              "3" = "Level 3", 
+                              "4" = "Level 4")) +
+    labs(title = "Best model fit for expectancy ratings",
+       subtitle = "Mixed Model fit includes 'Level' parameter",
+       caption = "Actual trial is shown as jittered dots (1 dot = 1 trial). 
+The lines indicate the predicted average from the model parameters.", 
+       x = "Length of Preceding Run", y = "Rating", 
+       color = 'Type of \nPreceding Run', fill = 'Type of \nPreceding Run') +
+    NULL
+```
+
+
+
+## Cardiac responses
+
+### Merge datasets
+
+Merge the ratings data with the ECG data.
+
+```{r}
+# Merge together the two datasets, to have the trial information together with the ECG data for each participant.
+# using dplyr::inner_join(), it only retains rows that match between the two datasets
+data_combined_wide <- inner_join(ratings, ecg_data, by = c("id", "trial"))
+
+# Add information from the "Rest" block
+#data_combined_wide <- inner_join(data_combined_wide, rest_data, by = c("id"))
+```
+
+
+Add the lagged variables and graph order
+
+```{r}
+data_combined_wide <- data_combined_wide %>%
+  group_by(id) %>%
+  mutate(count_lag = lag(count)) %>%
+  mutate(cond_lag = lag(condition)) %>%
+  ungroup() %>%
+  mutate(graph_order = case_when((cond_lag=='CS' & count_lag==1) ~ 4,
+                                 (cond_lag=='CS' & count_lag==2) ~ 3,
+                                 (cond_lag=='CS' & count_lag==3) ~ 2,
+                                 (cond_lag=='CS' & count_lag==4) ~ 1,
+                                 cond_lag=='CS-US' ~ count_lag+4),
+  pooled_order = case_when((cond_lag=='CS' & count_lag==1) ~ 4,
+                                  (cond_lag=='CS' & count_lag==2) ~ 3,
+                                  (cond_lag=='CS' & count_lag==3) ~ 2,
+                                  (cond_lag=='CS' & count_lag==4) ~ 1,
+                                  cond_lag=='CS-US' ~ count_lag+0))
+```
+
+
+### Gather heartbeats to one column
+
+Take the IBI columns and gather them under one single column (to have everything in "long" format)
+
+```{r}
+# tidyr::gather()
+data_combined_long <- data_combined_wide %>%
+  gather(key = "tp", value = "bpm", c("-5":"9"), na.rm = FALSE)
+
+# correct the order in the discrete X axis (re-order IBIPos variable)
+tp_order <- c("-5", "-4.5", "-4", "-3.5", "-3", "-2.5", "-2", "-1.5", "-1", "-0.5", "0", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7", "7.5", "8", "8.5", "9")
+
+data_combined_long$tp <- factor(data_combined_long$tp, levels = tp_order)
+data_combined_long <- data_combined_long %>% arrange(id, trial, tp)
+```
+
+### Remove outliers
+
+Use the `replace()` function to replace outlier values with `NA`.
+
+`replace(var, var<0, NA)`
+
+Also: go to actual ECG files and manually correct for these possible ECG R-peak misdetections.
+
+```{r}
+data_long_clean <- data_combined_long %>%
+  filter(!id==7) %>%
+  group_by(id) %>%
+  filter(between(bpm, 43, 133)) %>%
+  # Replace values that are below or above 5 SDs with NA
+  #mutate(bpm_clean = replace(bpm, (bpm < ((mean(bpm) - (3 * sd(bpm)))) | (bpm > (mean(bpm) + (3 * sd(bpm))))), NA)) %>%
+  #mutate(bpm_clean = replace(bpm, ((bpm < ((60/med_rest) - (25 * (60/sd_rest)))) | (bpm > ((60/med_rest) + (25 * (60/sd_rest))))), NA)) %>%
+  #filter(is.na(bpm_clean))# to output removed trials to console
+  mutate(bpm_clean=bpm) %>%
+  drop_na()
+```
+
+
+### Visualise cardiac response timecourse
+
+```{r}
+
+#data_long_clean$tp <- as.numeric(as.character(data_long_clean$tp))
+
+data_long_clean %>%
+  mutate(tp = as.numeric(as.character(tp))) %>%
+  ggplot(aes(y=bpm_clean, x = tp, group=condition, color=condition)) +
+    #geom_jitter(alpha=.5) + 
+    geom_vline(xintercept=c(-3,0,4), linetype=c("dashed", "dashed", "twodash")) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=.5) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .5) +  # mean and SE
+    scale_color_OkabeIto(labels=c("E1-alone", "E1-E2 pair")) +  # requires library(colorblindr)
+    theme_linedraw() +
+    scale_x_continuous(limits=c(-5.5, 9.5), breaks = seq(-5, 9, by = 1)) + 
+    #facet_wrap(count_lag~.) + 
+    #facet_wrap(id~.) + 
+    theme(aspect.ratio = .4) +
+    labs(
+       #title = "Average heart rate during a trial",
+       #subtitle = "Comparison of trials with and without a loud noise (E2)",
+       color = "Condition",
+       x = "Time in seconds (relative to E1 onset)",
+       y = "BPM") +
+    annotate("rect", xmin = -3.15, xmax=-3, ymin = 67.5, ymax=68.5, alpha=.2, fill = "red") + 
+    annotate("rect", xmin = 0., xmax=.5, ymin = 67.5, ymax=68.5, alpha=.2) + 
+    annotate("rect", xmin = 4., xmax=4.5, ymin = 67.5, ymax=68.5, alpha=.2) + 
+    annotate("text", x = -4, y = 68, label = "Rating", color = "black") + 
+    annotate("text", x = .85, y = 68, label = "E1", color = "black") + 
+    annotate("text", x = 5, y = 68, label = "E2", color = "black") + 
+    NULL
+
+
+```
+
+### Quantify phasic cardiac response to CS (anticipation of noise)
+
+```{r}
+data_long_newvars <- data_long_clean %>%
+  group_by(id, trial) %>%
+  # COMPONENT 1: MEAN CHANGE
+  mutate(bl = mean(c(bpm_clean[tp=="-4"], 
+                     bpm_clean[tp=="-3.5"], 
+                     bpm_clean[tp=="-3"]), 
+                   na.rm=T)) %>%  # Baseline
+  mutate(rel_bpm = (bpm_clean - bl)) %>%  
+  mutate(max_accel = mean(c(rel_bpm[tp=="0"],
+                           rel_bpm[tp=="0.5"],
+                           rel_bpm[tp=="1"],
+                           rel_bpm[tp=="1.5"],
+                           rel_bpm[tp=="2"],
+                           rel_bpm[tp=="2.5"],
+                           rel_bpm[tp=="3"],
+                           rel_bpm[tp=="3.5"]),
+                         na.rm=T)) %>%
+  mutate(max_accel = ifelse(is.infinite(max_accel), NA, max_accel)) %>% #we correct the fact that max() gives Inf if empty vector
+
+  # THE CHOSEN METRIC
+  mutate(hr = max_accel) %>%
+  ungroup()
+```
+
+
+T-scores
+
+```{r}
+data_long_newvars <- data_long_newvars %>%
+  group_by(id) %>%
+  mutate(z_score = scale(hr))
+```
+
+
+
+### Visualise cardiac response timecourse per condition
+
+```{r}
+
+dodge_width = .2
+pd <- position_dodge(width=dodge_width)
+
+#data_long_clean$tp <- as.numeric(as.character(data_long_clean$tp))
+
+# New facet label names for trial variable
+trial.labs <- c("Preceding Run E1", "Preceding Run E1-E2")
+names(trial.labs) <- c("CS", "CS-US")
+
+data_long_newvars %>%
+  filter(!(tp %in% c("4.5", "5", "5.5", "6", "6.5", "7", "7.5", "8", "8.5", "9"))) %>%
+  mutate(tp = as.numeric(as.character(tp))) %>%
+  ggplot(aes(y=rel_bpm, x = tp, group=as.factor(count_lag), color=as.factor(count_lag))) +
+    #geom_jitter(alpha=.5) + 
+    geom_vline(xintercept=c(-3,0), linetype="dashed") +
+    geom_hline(yintercept=0, linetype="dotted") +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=.5, position=pd) +          # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .2, position=pd) +  # mean and SE
+    #scale_color_OkabeIto() +  # requires library(colorblindr)
+    scale_colour_brewer(palette = "Set1") +
+    theme_bw() +
+    scale_x_continuous(limits=c(-5.5,9.5),breaks = seq(-4, 4, by = 1)) + 
+    facet_grid(cond_lag~., labeller = labeller(cond_lag=trial.labs)) + 
+    theme(aspect.ratio = .4,
+          strip.background = element_rect(fill="white"), 
+          #panel.border = element_blank(),
+          legend.position = c(0.85,.75)) +
+    labs(
+       #title = "Cardiac response in anticipation of E2",
+       color = "Length of \nPreceding Run",
+       x = "Time relative to E1 onset (s)",
+       y = "Δ Heart Rate (BPM)") +
+    NULL
+```
+
+### Reduced table
+
+Only need one value per trial (not all IBIs)
+
+```{r}
+cardiac_long_simple <- data_long_newvars %>%
+  group_by(id, trial) %>%
+  summarise(cond_lag = first(cond_lag), 
+            count_lag = first(count_lag), 
+            graph_order = first(graph_order), 
+            pooled_order = first(pooled_order),
+            hr = first(hr),
+            rating= first(rating)) %>%
+  ungroup()
+```
+
+
+### Plot
+
+Same as with expectancy ratings, in order to have more control on the data that is shown, I will now make a similar graph where the averages are calculate *manually*.
+I will calcualte individual averages and standard errors for each participant individually.
+The plot will then show the within-subject standard error. 
+
+```{r}
+cardiac_id_summary <- cardiac_long_simple %>%
+  group_by(id, cond_lag, count_lag, graph_order) %>%
+  summarize(val = mean(hr, na.rm = T),
+            sd  = sd(hr, na.rm = T),
+            se  = sd(hr, na.rm = T)/n(),
+            ci  = 1.96*se)  %>% # 95% confidence interval
+  group_by(cond_lag, count_lag) %>% 
+  mutate(group_val = mean(val, na.rm=T), 
+         group_se = mean(se, na.rm=T), 
+         group_ci = mean(ci, na.rm=T))
+```
+
+
+```{r}
+cardiac_id_summary %>%
+  ggplot(aes(y=group_val, x = factor(graph_order), group=cond_lag, color=cond_lag)) + # Remove group to have continuous line
+    #geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(y=val, group=factor(graph_order), fill=cond_lag, color=NA), alpha=.4) +
+    geom_jitter(aes(y=val, group=interaction(id, factor(graph_order)), color=cond_lag), alpha=.25, width=.1, height=.05) +
+    geom_point(aes(y=group_val), size = 3.) +
+    geom_ribbon(aes(ymin = group_val-group_se, ymax = group_val+group_se, fill=cond_lag, color=NULL), alpha = .4) +
+    geom_line(aes(group=cond_lag)) +
+    #geom_line(aes(y=val, group=interaction(id,cond_lag)), size=.25, alpha=.5) +
+    theme_linedraw() +
+       theme(aspect.ratio = 1,
+          #legend.position = c(0.225, 0.85),
+          legend.position = "none",
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    #stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    #stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    scale_color_OkabeIto(labels=c("E1-alone", "E1-E2 pair")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("E1-alone", "E1-E2 pair")) +  # requires library(colorblindr)
+    scale_x_discrete(labels=c("1" = "4", 
+                              "2" = "3", 
+                              "3" = "2", 
+                              "4" = "1", 
+                              "5" = "1", 
+                              "6" = "2", 
+                              "7" = "3", 
+                              "8" = "4")) +
+    scale_y_continuous(limits=c(-5,10)) +
+    labs(
+       #title = "Cardiac acceleration in \nanticipation of the loud noise",
+       #subtitle = "", 
+       #caption = "Cardiac reactivity is derived for each trial as the 
+#largest increase in inter-beat interval with respect to 
+#baseline across three heatbeats after after the onset of 
+#the tone (CS) preceding the loud noise (US).
+#A run is a sequence of consecutive trials of the same type", 
+       x = "Length of Preceding Run", y = "Mean Δ Heart Rate (BPM)", 
+       color = 'Type of \nPreceding Run', fill = 'Type of \nPreceding Run') +
+    NULL
+```
+
+
+### Simple correlation visualisation
+
+
+```{r}
+
+cardiac_long_simple %>%
+  #filter(trial>100) %>%
+  ggplot(aes(y=hr, x = rating)) + 
+    geom_point(alpha=.25) + 
+    geom_smooth(method='lm') + 
+    #facet_wrap(.~id) +
+    theme_linedraw() + 
+    NULL
+```
+
+Split up ratings in quintiles
+
+```{r}
+cardiac_long_simple_quint <- cardiac_long_simple %>%
+  group_by(id) %>%
+  mutate(rating_quintile = ntile(rating, 5)) %>%
+  mutate(hr_quintile = ntile(hr, 5))
+```
+
+```{r}
+cardiac_long_simple_quint %>%
+  ggplot(aes(y=hr_quintile, x = rating_quintile)) + 
+    geom_jitter(alpha=.25) + 
+    geom_smooth(method='loess') + 
+    geom_boxplot(aes(group=rating_quintile), width=.1) +
+    #facet_wrap(.~id) +
+    theme_linedraw() + 
+    NULL
+```
+
+
+
+### Combined data across the two conditions
+
+```{r}
+cardiac_id_summary_pooled <- cardiac_long_simple %>%
+  group_by(id, cond_lag, pooled_order) %>%
+  summarize(val = mean(hr, na.rm = T),
+            sd  = sd(hr, na.rm = T),
+            se  = sd(hr, na.rm = T)/n(),
+            ci  = 1.96*se)  %>% # 95% confidence interval
+  group_by(cond_lag, pooled_order) %>% 
+  mutate(group_val = mean(val, na.rm=T), group_se = mean(se, na.rm=T), group_ci = mean(ci, na.rm=T))
+```
+
+
+```{r}
+cardiac_id_summary_pooled %>%
+  ggplot(aes(y=group_val, x = factor(pooled_order), group=cond_lag, color=cond_lag)) + # Remove group to have continuous line
+    geom_hline(yintercept=0, linetype="dashed") +
+    geom_jitter(aes(y=val, group=interaction(id, factor(pooled_order))), alpha=.25, width=.1, height=.05) + # color=NULL
+    geom_point(aes(y=group_val), size = 3.) +
+    geom_ribbon(aes(ymin = group_val-group_ci, ymax = group_val+group_ci, fill=cond_lag, color=NULL), alpha = .4) +
+    geom_line(aes(group=cond_lag)) +
+    theme_linedraw() +
+       theme(aspect.ratio = 1,
+          #legend.position = c(0.225, 0.2),
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_x_discrete(labels=c("1" = "Level 1", 
+                              "2" = "Level 2", 
+                              "3" = "Level 3", 
+                              "4" = "Level 4")) +
+   #scale_y_reverse() +
+    labs(title = "Phasic cardiac response \nin anticipation of the loud noise",
+       subtitle = "", 
+       caption = "Cardiac reactivity is derived for each trial as the 
+percentage change in inter-beat interval for three 
+heatbeats before and after the onset of the tone (CS)
+preceding the loud noise (US).
+A run is a sequence of consecutive trials of the same type", 
+       x = "Length of Preceding Run", y = "Cardiac Reactivity Index", 
+       color = 'Type of \nPreceding Run', fill = 'Type of \nPreceding Run') +
+    NULL
+```
+
+### Mixed Models with trial data
+
+Maximum likelihood estimation using the `lme4` package.
+
+The individual is treated as a random draw from a population of individuals.
+
+### Mixed Model Comparison
+
+```{r}
+
+cardiac_trial_data_noNA <- 
+  cardiac_long_simple %>% 
+  drop_na()
+
+
+# Intercept only model
+cardiac_trial_data_noNA %>%
+  lmer(hr ~ trial + (1|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit4 }
+
+# "Flat" model: condition effect but no level effect
+cardiac_trial_data_noNA %>%
+  lmer(hr ~ cond_lag + trial + (1|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit5 }
+
+# "Slope" model: no condition effect, but level effect
+cardiac_trial_data_noNA %>%
+  lmer(hr ~ pooled_order + trial + (1|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit6 } 
+
+# "Both" model: condition effect, with level effect
+cardiac_trial_data_noNA %>%
+  lmer(hr ~ cond_lag + pooled_order + trial + (1|id),  #count_lag
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit7 } 
+
+# With interaction (seems to give isSingular problem)
+#cardiac_trial_data_noNA %>%
+#  lmer(hr ~ cond_lag * count_lag + (1|id), 
+#       data=., 
+#       REML=F, 
+#        control=lmerControl(optimizer="bobyqa",
+#                                 optCtrl=list(maxfun=2e5))) %>%
+#  {. ->> mm_fit8 } 
+
+
+# Model with pooled order is the exact same as graph_order
+# cardiac_long_simple %>%
+#   lmer(hr ~ cond_lag + pooled_order + (1 + cond_lag + pooled_order | id), 
+#        data=., 
+#        REML=F, 
+#         control=lmerControl(optimizer="bobyqa",
+#                                  optCtrl=list(maxfun=2e5))) %>%
+#   {. ->> mm_fit9 } 
+
+
+anova(mm_fit4, mm_fit5, mm_fit7)
+anova(mm_fit4, mm_fit6, mm_fit7)
+```
+
+
+```{r}
+
+cardiac_trial_data_noNA %>%
+  lmer(hr ~ cond_lag + pooled_order + trial + (1|id),  #count_lag
+       data=., 
+       REML=T, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit7 } 
+
+summary(mm_fit7)
+```
+
+Export data
+
+```{r eval=F}
+data1a <- cardiac_trial_data_noNA %>%
+  mutate(id=id) 
+
+write.csv(data1a, file = "data_hr_e1_exp1.csv" ,row.names = T)
+```
+
+
+#### Plot model
+
+From the model fit, we can generate new data points using the `predict()`
+function.
+
+```{r}
+cardiac_long_simple <- 
+  cardiac_long_simple %>%
+    drop_na() %>%
+    mutate(model_pred = predict(mm_fit7))
+
+cardiac_long_simple %>%
+  ggplot(aes(y=model_pred, x = factor(graph_order), group=cond_lag)) + # Remove group to have continuous line
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(y=hr, group=factor(count_lag), fill=cond_lag, color=NA), alpha=.5) +
+    #geom_jitter(aes(y=hr, group=factor(count_lag), color=cond_lag), alpha=.1 ) + # color=NULL
+    theme_linedraw() +
+       theme(aspect.ratio = 1,
+          #legend.position = 'right',
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", size=0.5, linetype="solid")) +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_x_discrete(labels=c("1" = "4", 
+                              "2" = "3", 
+                              "3" = "2", 
+                              "4" = "1", 
+                              "5" = "1", 
+                              "6" = "2", 
+                              "7" = "3", 
+                              "8" = "4")) +
+    #scale_y_reverse() +
+    #scale_y_continuous(limits = c(-5,25)) +
+    labs(title = "Best model fit for cardiac deceleration",
+       subtitle = "The best model fit includes negative 'Level' \nparameter", 
+       caption = "", 
+       x = "Length of Preceding Run", y = "Peak Deceleration (increase in BPM)", 
+       color = 'Type of \nPreceding Run', fill = 'Type of \nPreceding Run') +
+    NULL
+```
+
+## Analysis of response to UCS (noise)
+
+
+### Calculate phasic cardiac response score
+
+Based on interpolated data.
+
+Look at responses from 1 to 3 *count_lag* (because cond_lag 4 is different condition already).
+
+CS only count_lag 1, 2, 3 (or count 2, 3, 4).
+CS-US only, count_lag 1, 2, 3 (or count 2, 3, 4).
+
+```{r}
+data_us_long_newvars <- data_long_clean %>%
+  filter(count_lag<4) %>%
+  group_by(id, trial) %>%
+  
+  # COMPONENT 1: MAXIMUM ACCELERATION
+  mutate(bl = mean(c(
+                     bpm_clean[tp=="3"], 
+                     bpm_clean[tp=="3.5"]), na.rm=T)) %>%  # Baseline
+  mutate(rel_bpm = (bpm_clean - bl)) %>%  
+  mutate(max_accel = mean(c(
+                           rel_bpm[tp=="4.5"],
+                           rel_bpm[tp=="5"], 
+                           rel_bpm[tp=="5.5"], 
+                           rel_bpm[tp=="6"],
+                           rel_bpm[tp=="6.5"],
+                           rel_bpm[tp=="7"], 
+                           rel_bpm[tp=="7.5"],
+                           rel_bpm[tp=="8"],
+                           rel_bpm[tp=="8.5"]),
+                          na.rm=T)) %>%
+  mutate(max_accel = ifelse(is.infinite(max_accel), NA, max_accel)) %>% #we correct the fact that max() gives Inf if empty vector
+  # THE CHOSEN METRIC
+  mutate(hr = max_accel) %>%
+  ungroup()
+```
+
+```{r}
+
+dodge_width = .2
+pd <- position_dodge(width=dodge_width)
+
+# New facet label names for trial variable
+trial.labs <- c("Trial without E2", "E1-E2 trial")
+names(trial.labs) <- c("CS", "CS-US")
+
+data_us_long_newvars %>%
+  filter(condition=='CS-US') %>%
+  mutate(tp = as.numeric(as.character(tp))) %>%
+  ggplot(aes(y=rel_bpm, x = tp, group=as.factor(count_lag), color=as.factor(count_lag))) +
+    #geom_jitter(alpha=.5) + 
+    geom_vline(xintercept=3.5, linetype="twodash") +
+    geom_hline(yintercept=0, linetype="dotted") +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=.75, position=pd) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .5, position=pd) +  # mean and SE
+    scale_colour_brewer(palette = "Set1") +
+    theme_bw() +
+    #theme(panel.background = element_rect(fill="gray99"), panel.border = element_blank()) +
+    scale_x_continuous(limits=c(2,9),breaks = seq(2, 9, by = 1)) + 
+    facet_wrap(condition~., labeller = labeller(condition=trial.labs)) + 
+   theme(aspect.ratio = 1,
+          strip.background = element_rect(fill="white"), 
+          legend.position = "bottom"
+          #panel.border = element_blank(),
+          #legend.position = c(0.85,.75)
+         ) +
+    labs(
+      #title = "Cardiac response at the time of noise arrival",
+      #subtitle = "As per CURRENT CONDITION and CURRENT consecutive repetition",
+       color = "Number of Preceding \nE1-E2 Trials",
+       x = "Time in seconds (relative to E1 onset)",
+       y = "Δ Heart Rate (BPM)") +
+    NULL
+```
+
+
+To see response to UCS, should be done based on response extraction to UCS, because of jitter
+it is not possible to know with data time-locked to CS.
+
+```{r eval=F}
+
+data_us_long_newvars$tp <- as.numeric(as.character(data_long_clean$tp))
+
+data_us_long_newvars %>%
+  filter(condition=="CS-US") %>%
+  ggplot(aes(y=rel_bpm, x = tp, group=factor(count_lag), color=factor(count_lag))) +
+    #geom_jitter(alpha=.5) + 
+    geom_hline(yintercept=0) +
+    geom_vline(xintercept=c(-3.5,4), linetype="dashed") +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    theme_linedraw() +
+    scale_x_continuous(limits=c(2.5,9), breaks = seq(-5, 9, by = 1)) + 
+    #facet_grid(cond_lag~.) + 
+    #facet_wrap(id~.) + 
+    theme(aspect.ratio = .4) +
+    labs(title = "Trial heart rate",
+       color = "Count",
+       x = "Time in seconds (relative to CS onset)",
+       y = "Δ Heart Rate (BPM)") +
+    NULL
+```
+
+
+### Reduced table
+
+Only need one value per trial (not all IBIs)
+
+```{r}
+cardiac_us_long_simple <- data_us_long_newvars %>%
+  group_by(id, trial) %>%
+  summarise(condition = first(condition),
+            count = first(count),
+            cond_lag = first(cond_lag), 
+            count_lag = first(count_lag), 
+            graph_order = first(graph_order), 
+            pooled_order = first(pooled_order),
+            hr = first(hr),
+            rating= first(rating)) %>%
+  ungroup()
+```
+
+
+### Preliminary plot
+
+See mean value for each condition
+
+```{r}
+cardiac_us_long_simple %>%
+  #filter(condition=="CS-US") %>%
+  ggplot(aes(y=hr, x = factor(count_lag), color=factor(count_lag))) +
+    #geom_jitter(alpha=.5) + 
+    #geom_hline(yintercept=0) +
+    #geom_vline(xintercept=c(-3.5,4), linetype="dashed") +
+    stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    scale_color_OkabeIto() +  # requires library(colorblindr)
+    theme_linedraw() +
+    #scale_x_continuous(limits=c(2.5,9), breaks = seq(-5, 9, by = 1)) + 
+    facet_grid(cond_lag~.) + 
+    #facet_wrap(id~.) + 
+    theme(aspect.ratio = .4) +
+    labs(title = "Trial heart rate",
+       color = "Count",
+       x = "Length of Previous Run",
+       y = "BPM") +
+    NULL
+
+
+```
+
+### Plot
+
+Same as with expectancy ratings, in order to have more control on the data that is shown, I will now make a similar graph where the averages are calculate *manually*.
+I will calcualte individual averages and standard errors for each participant individually.
+The plot will then show the within-subject standard error. 
+
+```{r}
+cardiac_id_summary_us <- cardiac_us_long_simple %>%
+  group_by(id, condition, count_lag) %>%
+  summarize(val = mean(hr, na.rm = T),
+            sd  = sd(hr, na.rm = T),
+            se  = sd(hr, na.rm = T)/n(),
+            ci  = 1.96*se)  %>% # 95% confidence interval
+  group_by(condition, count_lag) %>% 
+  mutate(group_val = mean(val, na.rm=T), 
+         group_se = mean(se, na.rm=T), 
+         group_ci = mean(ci, na.rm=T))
+```
+
+
+```{r}
+cardiac_id_summary_us %>%
+   mutate(graph_order_2 = case_when((condition=='CS' & count_lag==1) ~ 3,
+                                 (condition=='CS' & count_lag==2) ~ 2,
+                                 (condition=='CS' & count_lag==3) ~ 1,
+                                 condition=='CS-US' ~ count_lag+3)) %>%
+  ggplot(aes(y=group_val, x = factor(graph_order_2), group=condition, color=condition)) + # Remove group to have continuous line
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(y=val, group=factor(graph_order_2), fill=condition, color=NA), alpha=.4) +
+    #geom_jitter(aes(y=val, group=interaction(id, factor(graph_order_2)), color=condition), alpha=.25, width=.1, height=.05) +
+    geom_point(aes(y=group_val), size = 3.) +
+    geom_ribbon(aes(ymin = group_val-group_ci, ymax = group_val+group_ci, fill=condition, color=NULL), alpha = .4) +
+    geom_line(aes(group=condition)) +
+    theme_linedraw() +
+       theme(aspect.ratio = 1,
+          #legend.position = c(0.225, 0.2),
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    #stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    #stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_fill_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    #scale_y_reverse() +
+    scale_x_discrete(labels=c("1" = "3", 
+                              "2" = "2", 
+                              "3" = "1", 
+                              "4" = "1", 
+                              "5" = "2", 
+                              "6" = "3")) +
+    labs(title = "Cardiac response after loud noise onset or silence",
+       subtitle = "", 
+       caption = "Cardiac reactivity is derived for each trial as the 
+largest increase in inter-beat interval with respect to 
+baseline across three heatbeats after after the onset of 
+the tone (CS) preceding the loud noise (US).
+A run is a sequence of consecutive trials of the same type", 
+       x = "Length of Preceding Run", y = "Maximum Increase in BPM", 
+       color = 'Type of \nCurrent Run', fill = 'Type of \nCurrent Run') +
+    NULL
+```
+
+```{r}
+cardiac_id_summary_us %>%
+   mutate(graph_order_2 = case_when((condition=='CS' & count_lag==1) ~ 3,
+                                 (condition=='CS' & count_lag==2) ~ 2,
+                                 (condition=='CS' & count_lag==3) ~ 1,
+                                 condition=='CS-US' ~ count_lag+3)) %>%
+  filter(condition=='CS-US') %>%
+  ggplot(aes(y=group_val, x = factor(graph_order_2), group=condition)) + # Remove group to have continuous line
+    geom_hline(yintercept=0, linetype="dashed") +
+    #geom_violin(aes(y=val, group=factor(graph_order_2), fill=condition, color=NA), alpha=.4) +
+    #geom_jitter(aes(y=val, group=interaction(id, factor(graph_order_2)), color=condition), alpha=.25, width=.1, height=.05) +
+    geom_ribbon(aes(ymin = group_val-group_se, ymax = group_val+group_se, color=NULL,), alpha = .15) +
+    geom_line(aes(group=condition)) +
+   geom_point(aes(y=group_val, color=factor(graph_order_2)), size = 3.) +
+    theme_linedraw() +
+       theme(aspect.ratio = 1,
+          legend.position = "none",
+          #legend.box = "horizontal",
+          legend.background = element_rect(fill="gray90", 
+                                  size=0.5, linetype="solid")) +
+    #stat_summary(fun.data = mean_cl_boot, geom = 'line', size=1.25) +  # line
+    #stat_summary(fun.data = mean_cl_boot, geom = 'pointrange', size = .75) +  # mean and SE
+    #scale_color_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    scale_colour_brewer(palette = "Set1") +
+    #scale_fill_OkabeIto(labels=c("CS only", "CS and US")) +  # requires library(colorblindr)
+    #scale_y_reverse() +
+    scale_x_discrete(labels=c("1" = "3", 
+                              "2" = "2", 
+                              "3" = "1", 
+                              "4" = "1", 
+                              "5" = "2", 
+                              "6" = "3")) +
+    labs(
+      #title = "Cardiac response after loud noise onset or silence",
+       subtitle = "", 
+       #caption = "Cardiac reactivity is derived for each trial as the 
+#largest increase in inter-beat interval with respect to 
+#baseline across three heatbeats after after the onset of 
+#the tone (CS) preceding the loud noise (US).
+#A run is a sequence of consecutive trials of the same type", 
+       x = "Length of Preceding Run", y = "Mean Δ Heart Rate (BPM)", 
+       color = 'Type of \nCurrent Run', fill = 'Type of \nCurrent Run') +
+    NULL
+```
+
+Get means
+
+```{r}
+cardiac_id_summary_us %>%
+   mutate(graph_order_2 = case_when((condition=='CS' & count_lag==1) ~ 3,
+                                 (condition=='CS' & count_lag==2) ~ 2,
+                                 (condition=='CS' & count_lag==3) ~ 1,
+                                 condition=='CS-US' ~ count_lag+3)) %>%
+  filter(condition=='CS-US') %>%
+  group_by(count_lag) %>%
+  summarise(mean = mean(group_val, na.rm=T))
+
+```
+
+### Mixed Model Comparison
+
+```{r}
+
+cardiac_trial_us_data_noNA <- 
+  cardiac_us_long_simple %>% 
+  filter(condition=='CS-US') %>%
+  drop_na()
+
+
+# Intercept only model
+cardiac_trial_us_data_noNA %>%
+  lmer(hr ~ trial + (1|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit10 }
+
+
+# "Slope" model: no condition effect, but level effect
+cardiac_trial_us_data_noNA %>%
+  lmer(hr ~ count_lag + trial + (1|id), 
+       data=., 
+       REML=F, 
+       control=lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))) %>%
+  {. ->> mm_fit11 } 
+
+anova(mm_fit10, mm_fit11)
+```
+
+```{r}
+summary(mm_fit11)
+```
+
+Export data
+
+```{r eval=F}
+data1 <- cardiac_trial_us_data_noNA %>%
+  mutate(id=id) 
+
+write.csv(data1, file = "data_hr_e2_exp1.csv" ,row.names = T)
+```
+

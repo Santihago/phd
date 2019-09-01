@@ -1,0 +1,63 @@
+1.0384 	WARNING 	Monitor specification not found. Creating a temporary one...
+1.6377 	EXP 	Created window1 = Window(allowGUI=True, allowStencil=False, args=UNKNOWN, autoLog=True, bitsMode=UNKNOWN, blendMode='avg', color=array([0., 0., 0.]), colorSpace='rgb', fullscr=UNKNOWN, gamma=None, kwargs=UNKNOWN, lms=UNKNOWN, monitor=<psychopy.monitors.calibTools.Monitor object at 0x11115c190>, multiSample=False, name='window1', numSamples=2, pos=[480, 120], screen=0, size=array([1600, 1200]), stereo=False, units='pix', useFBO=False, useRetina=True, viewOri=0.0, viewPos=None, viewScale=None, waitBlanking=True, winType=u'pyglet')
+1.6837 	EXP 	Created unnamed TextStim = TextStim(alignHoriz='center', alignVert='center', antialias=True, autoLog=True, bold=False, color='black', colorSpace='named', contrast=1.0, depth=0, flipHoriz=False, flipVert=False, font='', fontFiles=[], height=15, italic=False, name='unnamed TextStim', opacity=1.0, ori=0.0, pos=array([0., 0.]), rgb=array([0., 0., 0.]), text='Simultaneous (y) or Not simultaneous (n)?', units='pix', win=Window(...), wrapWidth=500)
+1.7077 	EXP 	Set  sound=G
+1.8217 	EXP 	New trial (rep=0, index=0): []
+2.5220 	EXP 	Sound  started
+3.2228 	EXP 	Sound  started
+3.9234 	EXP 	Sound  started
+4.6246 	EXP 	Sound  started
+5.3250 	EXP 	Sound  started
+11.3733 	EXP 	New trial (rep=0, index=1): []
+12.0746 	EXP 	Sound  started
+12.7760 	EXP 	Sound  started
+13.4773 	EXP 	Sound  started
+14.1785 	EXP 	Sound  started
+14.8797 	EXP 	Sound  started
+20.9083 	EXP 	New trial (rep=0, index=2): []
+21.6085 	EXP 	Sound  started
+22.3087 	EXP 	Sound  started
+23.0090 	EXP 	Sound  started
+23.7098 	EXP 	Sound  started
+24.4110 	EXP 	Sound  started
+30.4442 	EXP 	New trial (rep=0, index=3): []
+31.1449 	EXP 	Sound  started
+31.8462 	EXP 	Sound  started
+32.5474 	EXP 	Sound  started
+33.2486 	EXP 	Sound  started
+33.9499 	EXP 	Sound  started
+39.9800 	EXP 	New trial (rep=0, index=4): []
+40.6802 	EXP 	Sound  started
+41.3804 	EXP 	Sound  started
+42.0817 	EXP 	Sound  started
+42.7829 	EXP 	Sound  started
+43.4841 	EXP 	Sound  started
+49.5178 	EXP 	New trial (rep=0, index=5): []
+50.2190 	EXP 	Sound  started
+50.9202 	EXP 	Sound  started
+51.6214 	EXP 	Sound  started
+52.3225 	EXP 	Sound  started
+53.0238 	EXP 	Sound  started
+59.0535 	EXP 	New trial (rep=1, index=0): []
+59.7549 	EXP 	Sound  started
+60.4562 	EXP 	Sound  started
+61.1574 	EXP 	Sound  started
+61.8587 	EXP 	Sound  started
+62.5600 	EXP 	Sound  started
+68.5908 	EXP 	New trial (rep=1, index=1): []
+69.2921 	EXP 	Sound  started
+69.9934 	EXP 	Sound  started
+70.6946 	EXP 	Sound  started
+71.3958 	EXP 	Sound  started
+72.0971 	EXP 	Sound  started
+77.9437 	DATA 	Keypress: escape
+77.9450 	DATA 	Keypress: escape
+78.1264 	EXP 	New trial (rep=1, index=2): []
+78.4280 	DATA 	Keypress: escape
+78.8267 	EXP 	Sound  started
+79.2355 	DATA 	Keypress: escape
+79.5279 	EXP 	Sound  started
+79.8316 	DATA 	Keypress: escape
+80.2292 	EXP 	Sound  started
+80.9305 	EXP 	Sound  started
+81.6278 	EXP 	window1: mouseVisible = True

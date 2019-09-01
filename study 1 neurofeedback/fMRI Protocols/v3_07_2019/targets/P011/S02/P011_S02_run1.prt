@@ -1,0 +1,99 @@
+FileVersion:        3
+
+ResolutionOfTime:   Volume
+
+Experiment:         NFRating_P011_S02_run1
+
+BackgroundColor:    0 0 0
+TextColor:          255 255 255
+TimeCourseColor:    255 255 255
+TimeCourseThick:    4
+ReferenceFuncColor: 0 0 80
+ReferenceFuncThick: 3
+
+ParametricWeights:  1
+
+NrOfConditions:     7
+
+rest
+11
+   1   16 1
+  50   65 1
+ 100  115 1
+ 151  166 1
+ 199  214 1
+ 249  264 1
+ 300  315 1
+ 349  364 1
+ 398  413 1
+ 449  464 1
+ 500  515 1
+Color: 230 25 75
+
+task6
+5
+  17   32 6
+  66   81 6
+ 167  182 6
+ 265  280 6
+ 316  331 6
+Color: 234 209 93
+
+task9
+5
+ 116  131 9
+ 215  230 9
+ 365  380 9
+ 414  429 9
+ 465  480 9
+Color: 82 210 115
+
+rating
+9
+  35   40 6
+  83   88 6
+ 134  139 9
+ 184  189 6
+ 234  239 9
+ 283  288 6
+ 333  338 6
+ 433  438 9
+ 484  489 9
+Color: 220 220 220
+
+confidence
+9
+  42   47 1
+  92   97 1
+ 143  148 1
+ 191  196 1
+ 241  246 1
+ 292  297 1
+ 341  346 1
+ 441  446 1
+ 492  497 1
+Color: 150 150 150
+
+feedback
+10
+  48   49 1
+  98   99 1
+ 149  150 1
+ 197  198 1
+ 247  248 1
+ 298  299 1
+ 347  348 1
+ 396  397 1
+ 447  448 1
+ 498  499 1
+Color: 245 130 48
+
+ratingcatch
+1
+ 383  388 1
+Color: 56 181 169
+
+confcatch
+1
+ 390  395 1
+Color: 255 117 211
